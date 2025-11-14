@@ -51,10 +51,12 @@ impl LuaExecutor {
         let globals = lua.globals();
         let _ = globals.raw_set("io", Value::Nil);
         let _ = globals.raw_set("os", Value::Nil);
-        let _ = globals.raw_set("package", Value::Nil);
         globals.set("print", self.make_print_fn(&lua, stdout.clone())?)?;
         globals.set("warn", self.make_warn_fn(&lua, stderr.clone())?)?;
-        globals.set("rust", rust_api)?;
+        globals.set("rust", rust_api.clone())?;
+        let package = self.build_package_table(&lua)?;
+        globals.set("package", package)?;
+        globals.set("require", self.make_safe_require_fn(&lua)?)?;
 
         let value = lua.load(script).set_name("tool").eval::<Value>()?;
         let logs = collect_buffer(logs);
@@ -215,13 +217,25 @@ impl LuaExecutor {
         lua: &'lua Lua,
         sink: Rc<RefCell<Vec<String>>>,
     ) -> Result<mlua::Function<'lua>> {
-        let fun = lua.create_function(move |_, payload: Table| {
-            let level: Option<String> = payload.get("level").ok();
-            let message: String = payload
-                .get("message")
-                .map_err(|_| mlua::Error::external("log expects table with 'message' field"))?;
-            let level = level.unwrap_or_else(|| "info".into()).to_lowercase();
-            sink.borrow_mut().push(format!("[{level}] {message}"));
+        let fun = lua.create_function(move |_, payload: Value| {
+            let (level, message) = match payload {
+                Value::String(text) => ("info".to_string(), text.to_string_lossy().into_owned()),
+                Value::Table(table) => {
+                    let level = table.get::<_, Option<String>>("level").ok().flatten();
+                    let message: String = table
+                        .get("message")
+                        .map_err(|_| mlua::Error::external("log expects `message` field"))?;
+                    (level.unwrap_or_else(|| "info".into()), message)
+                }
+                Value::Nil => ("info".to_string(), "<nil>".into()),
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "log expects string or table, got {other:?}"
+                    )));
+                }
+            };
+            sink.borrow_mut()
+                .push(format!("[{}] {}", level.to_lowercase(), message));
             Ok(())
         })?;
         Ok(fun)
@@ -352,6 +366,41 @@ impl LuaExecutor {
                 .join("\t");
             sink.borrow_mut().push(line);
             Ok(())
+        })?;
+        Ok(fun)
+    }
+
+    fn build_package_table<'lua>(&self, lua: &'lua Lua) -> Result<Table<'lua>> {
+        let package = lua.create_table()?;
+        let preload = lua.create_table()?;
+        let loader = lua.create_function(move |lua_ctx, _name: String| {
+            let globals = lua_ctx.globals();
+            let rust_table: Table = globals
+                .get("rust")
+                .map_err(|_| mlua::Error::external("rust helpers missing"))?;
+            Ok(rust_table)
+        })?;
+        preload.set("rust", loader)?;
+        package.set("preload", preload)?;
+        package.set("path", "")?;
+        package.set("cpath", "")?;
+        Ok(package)
+    }
+
+    fn make_safe_require_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let fun = lua.create_function(|lua_ctx, name: String| {
+            let globals = lua_ctx.globals();
+            let package: Table = globals
+                .get("package")
+                .map_err(|_| mlua::Error::external("package table missing"))?;
+            let preload: Table = package
+                .get("preload")
+                .map_err(|_| mlua::Error::external("package.preload missing"))?;
+            let loader: mlua::Function = preload.get(name.as_str()).map_err(|_| {
+                mlua::Error::external(format!("module '{name}' not available (only 'rust')"))
+            })?;
+            let module: Table = loader.call(name)?;
+            Ok(module)
         })?;
         Ok(fun)
     }

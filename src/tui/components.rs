@@ -17,7 +17,7 @@ const SELENAI_BANNER: &[&str] = &[
     r" /        \ |        \|    |___  |        \/    |    \/    |    \   |",
     r"/_______  //_______  /|_______ \/_______  /\____|__  /\____|__  /___|",
     r"        \/         \/         \/        \/         \/         \/     ",
-    r"                              S E L E N A I",
+    r"                            S E L E N A I V0.01",
 ];
 
 pub fn render_chat(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -43,12 +43,22 @@ pub fn render_chat(frame: &mut Frame, area: Rect, state: &AppState) {
         lines.push(Line::from("No messages yet. Type below to get started."));
     }
 
-    let block = base_block("Conversation", state.focus == FocusTarget::Chat);
+    let mut title = "Conversation".to_string();
     let inner_height = area.height.saturating_sub(2).max(1);
     let total_lines = lines.len() as u16;
     let baseline = total_lines.saturating_sub(inner_height);
     let offset_from_bottom = state.chat_scroll.min(baseline);
     let scroll_top = baseline.saturating_sub(offset_from_bottom);
+    if total_lines > inner_height {
+        let percent = if baseline == 0 {
+            100
+        } else {
+            let ratio = scroll_top as f64 / baseline as f64;
+            (ratio * 100.0).round() as u16
+        };
+        title = format!("Conversation ({percent:>3}%)");
+    }
+    let block = base_block(&title, state.focus == FocusTarget::Chat, state.copy_mode);
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll_top, 0))
@@ -84,7 +94,11 @@ pub fn render_tool_logs(frame: &mut Frame, area: Rect, state: &AppState) {
         ));
     }
 
-    let block = base_block("Tool activity", state.focus == FocusTarget::Tool);
+    let block = base_block(
+        "Tool activity",
+        state.focus == FocusTarget::Tool,
+        state.copy_mode,
+    );
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((state.tool_scroll, 0))
@@ -98,7 +112,7 @@ pub fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
     if text.is_empty() {
         text.push_str("Type a message, or `/lua <code>` to run Lua.");
     }
-    let block = base_block("Input", state.focus == FocusTarget::Input);
+    let block = base_block("Input", state.focus == FocusTarget::Input, state.copy_mode);
     let paragraph = Paragraph::new(text).block(block);
     frame.render_widget(paragraph, area);
 
@@ -117,12 +131,16 @@ fn role_color(role: Role) -> Color {
     }
 }
 
-fn base_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
-    let mut block = Block::default().borders(Borders::ALL).title(title);
-    if focused {
-        block = block.border_style(Style::default().fg(Color::Cyan));
+fn base_block<'a>(title: &'a str, focused: bool, copy_mode: bool) -> Block<'a> {
+    if copy_mode {
+        Block::default().title(title)
+    } else {
+        let mut block = Block::default().borders(Borders::ALL).title(title);
+        if focused {
+            block = block.border_style(Style::default().fg(Color::Cyan));
+        }
+        block
     }
-    block
 }
 
 fn append_multiline(lines: &mut Vec<Line>, text: &str) {

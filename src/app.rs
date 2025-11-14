@@ -146,6 +146,19 @@ impl App {
                     self.state.input.clear();
                     return;
                 }
+                KeyCode::Char('b') => {
+                    self.state.copy_mode = !self.state.copy_mode;
+                    let status = if self.state.copy_mode {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    self.state.push_message(Message::new(
+                        Role::Assistant,
+                        format!("Copy-friendly mode {status}. Panel borders {status}."),
+                    ));
+                    return;
+                }
                 _ => {}
             }
         }
@@ -282,10 +295,10 @@ impl App {
 
     fn build_system_prompt(&self) -> String {
         let mut prompt = format!(
-            "You are SelenAI, a terminal-based AI pair programmer. You can analyze the current repository and may call the `{LLM_LUA_TOOL_NAME}` tool to run Lua code inside a sandboxed helper VM.\n\n\
+            "You are SelenAI, a terminal-based AI pair programmer. You can analyze the current repository and MUST aggressively use the `{LLM_LUA_TOOL_NAME}` tool to run Lua code inside a sandboxed helper VM whenever you need information or validation. Do not guess when you can fetch real data from code execution.\n\n\
 Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidance):\n\
 - Always outline a brief plan before editing files or running tools.\n\
-- Prefer using the Lua tool to inspect files, summarize diffs, or run validations instead of guessing.\n\
+- Default to the Lua tool for inspecting files, reading configs, summarizing diffs, running tests, or performing calculations; if you choose not to run it, explain why.\n\
 - Describe the script you will run, call the tool, then interpret the output before proceeding.\n\
 - Keep changes minimal, review results, and avoid destructive edits without explicit confirmation.\n\
 - If a run fails, explain what happened and adjust.\n\n"
@@ -469,11 +482,7 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
                 } else {
                     let _ = writeln!(summary, "Sandbox is read-only; executing immediately.");
                 }
-                let mut message = Message::new(Role::Assistant, summary);
-                if invocation.call_id.is_some() {
-                    message.tool_calls.push(invocation.clone());
-                }
-                self.state.push_message(message);
+                self.render_tool_summary(summary, &invocation);
 
                 let title = request
                     .reason
@@ -492,6 +501,20 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
                     format!("Invalid `{LLM_LUA_TOOL_NAME}` request: {err}"),
                 ));
             }
+        }
+    }
+
+    fn render_tool_summary(&mut self, summary: String, invocation: &ToolInvocation) {
+        if let Some(idx) = self.current_stream_message_index() {
+            if !self.state.message_is_empty(idx) {
+                self.state.append_to_message(idx, "\n");
+            }
+            self.state.append_to_message(idx, &summary);
+            self.state.append_tool_call(idx, invocation.clone());
+        } else {
+            let mut message = Message::new(Role::Assistant, summary);
+            message.tool_calls.push(invocation.clone());
+            self.state.push_message(message);
         }
     }
 
@@ -541,6 +564,12 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
                 &format!("No queued {LLM_LUA_TOOL_NAME} requests to execute."),
             ));
         }
+    }
+
+    fn current_stream_message_index(&self) -> Option<usize> {
+        self.active_stream
+            .as_ref()
+            .map(|stream| stream.message_index)
     }
 
     fn skip_pending_tool(&mut self, entry_id: Option<usize>) {
@@ -807,6 +836,7 @@ pub struct AppState {
     /// Number of lines to keep above the latest message (0 = follow bottom).
     pub chat_scroll: u16,
     pub tool_scroll: u16,
+    pub copy_mode: bool,
 }
 
 impl Default for AppState {
@@ -818,6 +848,7 @@ impl Default for AppState {
             focus: FocusTarget::Input,
             chat_scroll: 0,
             tool_scroll: 0,
+            copy_mode: false,
         };
         state.push_message(Message::new(
             Role::Assistant,
@@ -850,6 +881,12 @@ impl AppState {
         if let Some(message) = self.messages.get_mut(index) {
             message.content.push_str(text);
             self.chat_scroll = 0;
+        }
+    }
+
+    pub fn append_tool_call(&mut self, index: usize, invocation: ToolInvocation) {
+        if let Some(message) = self.messages.get_mut(index) {
+            message.tool_calls.push(invocation);
         }
     }
 
