@@ -35,7 +35,9 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test --all --locked
 
-      # Use the Docker container method for Tarpaulin as a separate job or step for simplicity/stability
+      # Run coverage using the prebuilt tarpaulin GitHub Action
       - name: Coverage (tarpaulin)
-        run: docker run --security-opt seccomp=unconfined -v "${PWD}:/volume" xd009642/tarpaulin --workspace --timeout 180
-
+        uses: actions-rs/tarpaulin@v0.1
+        with:
+          toolchain: stable
+          args: '--workspace --timeout 180'
