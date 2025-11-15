@@ -14,28 +14,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
+      # Use Swatinem/rust-cache for efficient dependency caching
+      - name: Setup Rust and Cache
+        uses: Swatinem/rust-cache@v2
         with:
-          profile: minimal
-          toolchain: stable
-          components: rustfmt, clippy
-          override: true
+          # Automatically installs rustfmt and clippy if defined in rust-toolchain.toml
+          # or if the components are needed by a subsequent cargo command
+          cache-on-build: true 
 
+      # System dependencies can often be combined in one run step
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
 
-      - name: Cargo fmt
-        run: cargo fmt -- --check
+      # Combine fmt, clippy, and test into a single, logical step for quicker feedback
+      - name: Fmt, Clippy, and Test
+        run: |
+          cargo fmt -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --all --locked
 
-      - name: Cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Cargo test
-        run: cargo test --all --locked
-
+      # Use the Docker container method for Tarpaulin as a separate job or step for simplicity/stability
       - name: Coverage (tarpaulin)
-        uses: actions-rs/tarpaulin@v0.1
-        with:
-          version: '0.34.1'
-          args: '--workspace --timeout 180'
+        run: docker run --security-opt seccomp=unconfined -v "${PWD}:/volume" xd009642/tarpaulin --workspace --timeout 180
+
