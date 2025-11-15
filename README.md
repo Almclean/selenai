@@ -259,6 +259,11 @@ current roadmap and guardrails around tool execution UX.
 
 ---
 
+## Contributing
+Issues and pull requests are welcome! See
+[CONTRIBUTING.md](CONTRIBUTING.md) for local setup steps, testing tips, and
+guidelines for adding Lua helpers or provider integrations.
+
 ## Additional Reading
 - `docs/mvp_plan.md` – big-picture roadmap, architecture, and testing strategy.
 - `docs/lua_tool_plan.md` – rationale behind the Lua tool UX and prompts.
