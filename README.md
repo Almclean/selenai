@@ -20,8 +20,23 @@ write-capable scripts before they touch your workspace.
 - **Plan-first design ethos** – the default system prompt mirrors the guidance
   from Cloudflare’s Code Mode + Anthropic’s MCP posts: plan → run tools →
   inspect → edit, and always explain the scripts you are about to execute.
-- **Persisted session logs** – every run leaves behind chat transcripts and tool
+- ✨ **Persisted session logs** – every run leaves behind chat transcripts and tool
   logs under `.selenai/logs` (configurable) so you can review or diff later.
+
+![SelenAI demo](https://private-user-images.githubusercontent.com/37902/514817922-d268f8ba-abb8-49c0-a99c-cf5e0455b2c0.gif?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NjMyNTA4MDUsIm5iZiI6MTc2MzI1MDUwNSwicGF0aCI6Ii8zNzkwMi81MTQ4MTc5MjItZDI2OGY4YmEtYWJiOC00OWMwLWE5OWMtY2Y1ZTA0NTViMmMwLmdpZj9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTExMTUlMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUxMTE1VDIzNDgyNVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTZmZjAwNjg1YTczYTZjZDA5ZjNjNDk4NDgwZDhmZGI2NjYwMTM4YzIyYTk4OWYwNmExMmM0ZDAxNjlkYTkwMGMmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.9fYW0XpZb85U5qU5o7RrUDjdKqFA5SncDyVLSgoSHGM)
+
+## Table of Contents
+- [Highlights](#highlights)
+- [Quick Start](#quick-start)
+- [Runtime Configuration](#runtime-configuration)
+- [Working in the TUI](#working-in-the-tui)
+- [Lua Sandbox API](#lua-sandbox-api)
+- [Architecture Overview](#architecture-overview)
+- [Engineering Principles](#engineering-principles)
+- [Development Workflow](#development-workflow)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [Docs](docs/)
 
 ---
 
