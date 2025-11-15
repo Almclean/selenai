@@ -562,7 +562,7 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
         } else {
             self.state.push_message(Message::new(
                 Role::Assistant,
-                &format!("No queued {LLM_LUA_TOOL_NAME} requests to execute."),
+                format!("No queued {LLM_LUA_TOOL_NAME} requests to execute."),
             ));
         }
     }
@@ -1078,6 +1078,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_lua_command_handles_whitespace() {
+        assert_eq!(parse_lua_command("   /lua   return 1"), Some("return 1"));
+        assert_eq!(parse_lua_command("/lua"), Some(""));
+        assert_eq!(parse_lua_command("lua return 1"), None);
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
     fn app_state_append_resets_scroll() {
         let mut state = AppState::default();
         state.chat_scroll = 7;
@@ -1115,5 +1123,25 @@ mod tests {
         input.delete_char();
         assert_eq!(input.buffer(), "!好");
         assert!(input.cursor_display_offset() > 0);
+    }
+
+    #[test]
+    fn adjust_scroll_never_underflows() {
+        let mut scroll = 0;
+        adjust_scroll(&mut scroll, -10);
+        assert_eq!(scroll, 0);
+        adjust_scroll(&mut scroll, 5);
+        assert_eq!(scroll, 5);
+    }
+
+    #[test]
+    fn adjust_chat_scroll_moves_up_and_down() {
+        let mut offset = 0;
+        adjust_chat_scroll(&mut offset, -3); // scroll up
+        assert_eq!(offset, 3);
+        adjust_chat_scroll(&mut offset, 2); // move towards bottom
+        assert_eq!(offset, 1);
+        adjust_chat_scroll(&mut offset, 10); // clamp at 0
+        assert_eq!(offset, 0);
     }
 }

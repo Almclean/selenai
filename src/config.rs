@@ -50,17 +50,12 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
+    #[default]
     Stub,
     OpenAi,
-}
-
-impl Default for ProviderKind {
-    fn default() -> Self {
-        ProviderKind::Stub
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

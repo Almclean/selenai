@@ -138,10 +138,10 @@ fn serialize_message(message: &Message) -> Option<Value> {
 }
 
 fn log_payload(payload: &Value) {
-    if env::var("SELENAI_DEBUG_OPENAI").is_ok() {
-        if let Ok(pretty) = serde_json::to_string_pretty(payload) {
-            eprintln!("[selenai][openai] payload:\n{}", pretty);
-        }
+    if env::var("SELENAI_DEBUG_OPENAI").is_ok()
+        && let Ok(pretty) = serde_json::to_string_pretty(payload)
+    {
+        eprintln!("[selenai][openai] payload:\n{}", pretty);
     }
 }
 
@@ -261,10 +261,10 @@ fn parse_chat_response(value: &Value) -> Result<ChatResponse> {
 }
 
 fn parse_message(value: &Value) -> Result<ChatResponse> {
-    if let Some(tool_calls) = value.get("tool_calls").and_then(|v| v.as_array()) {
-        if let Some(invocation) = tool_calls.iter().find_map(parse_tool_call) {
-            return Ok(ChatResponse::ToolCall(invocation));
-        }
+    if let Some(tool_calls) = value.get("tool_calls").and_then(|v| v.as_array())
+        && let Some(invocation) = tool_calls.iter().find_map(parse_tool_call)
+    {
+        return Ok(ChatResponse::ToolCall(invocation));
     }
 
     let content = value
@@ -302,10 +302,10 @@ fn handle_stream_chunk(
 
     for choice in choices {
         if let Some(delta) = choice.get("delta") {
-            if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-                if !content.is_empty() {
-                    let _ = sender.send(StreamEvent::Delta(content.to_string()));
-                }
+            if let Some(content) = delta.get("content").and_then(|v| v.as_str())
+                && !content.is_empty()
+            {
+                let _ = sender.send(StreamEvent::Delta(content.to_string()));
             }
 
             if let Some(tool_list) = delta.get("tool_calls").and_then(|v| v.as_array()) {
@@ -328,10 +328,10 @@ fn handle_stream_chunk(
             }
         }
 
-        if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str()) {
-            if reason == "tool_calls" {
-                finalize_tool_calls(tool_calls, sender);
-            }
+        if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str())
+            && reason == "tool_calls"
+        {
+            finalize_tool_calls(tool_calls, sender);
         }
     }
 

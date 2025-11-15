@@ -176,6 +176,6 @@ fn estimate_line_height(line: &Line, width: usize) -> u16 {
     if line_width == 0 {
         return 1;
     }
-    let rows = (line_width + width - 1) / width;
+    let rows = line_width.div_ceil(width);
     rows.min(u16::MAX as usize) as u16
 }

@@ -684,6 +684,14 @@ mod tests {
         handle.join().expect("server thread");
         Ok(())
     }
+
+    #[test]
+    fn file_mode_parse_supports_core_modes() {
+        assert!(matches!(FileMode::parse("r").unwrap(), FileMode::Read));
+        assert!(matches!(FileMode::parse("w").unwrap(), FileMode::Write));
+        assert!(matches!(FileMode::parse("a").unwrap(), FileMode::Append));
+        assert!(FileMode::parse("invalid").is_err());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
