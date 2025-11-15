@@ -1,12 +1,13 @@
 use std::{
     cell::RefCell,
-    fs,
+    ffi::OsString,
+    fs, io,
     path::{Component, Path, PathBuf},
     rc::Rc,
 };
 
 use anyhow::{Context, Result, bail};
-use mlua::{Lua, LuaOptions, StdLib, Table, Value, Variadic};
+use mlua::{Lua, LuaOptions, StdLib, Table, UserData, UserDataMethods, Value, Variadic};
 use reqwest::{Method, blocking::Client, header::HeaderName, header::HeaderValue};
 
 pub struct LuaExecutor {
@@ -49,11 +50,12 @@ impl LuaExecutor {
         let stderr = Rc::new(RefCell::new(Vec::new()));
         let rust_api = self.build_rust_api(&lua, logs.clone(), stderr.clone())?;
         let globals = lua.globals();
-        let _ = globals.raw_set("io", Value::Nil);
         let _ = globals.raw_set("os", Value::Nil);
         globals.set("print", self.make_print_fn(&lua, stdout.clone())?)?;
         globals.set("warn", self.make_warn_fn(&lua, stderr.clone())?)?;
         globals.set("rust", rust_api.clone())?;
+        globals.set("io", self.build_io_table(&lua)?)?;
+        globals.set("fs", self.build_fs_table(&lua)?)?;
         let package = self.build_package_table(&lua)?;
         globals.set("package", package)?;
         globals.set("require", self.make_safe_require_fn(&lua)?)?;
@@ -87,6 +89,21 @@ impl LuaExecutor {
         Ok(table)
     }
 
+    fn build_io_table<'lua>(&self, lua: &'lua Lua) -> Result<Table<'lua>> {
+        let table = lua.create_table()?;
+        table.set("open", self.make_io_open_fn(lua)?)?;
+        table.set("lines", self.make_io_lines_fn(lua)?)?;
+        Ok(table)
+    }
+
+    fn build_fs_table<'lua>(&self, lua: &'lua Lua) -> Result<Table<'lua>> {
+        let table = lua.create_table()?;
+        table.set("read", self.make_read_fn(lua)?)?;
+        table.set("write", self.make_write_fn(lua)?)?;
+        table.set("list", self.make_list_fn(lua)?)?;
+        Ok(table)
+    }
+
     fn make_read_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
         let root = self.workspace_root.clone();
         let fun = lua.create_function(move |_, path: String| {
@@ -96,6 +113,55 @@ impl LuaExecutor {
                 mlua::Error::external(format!("could not read {}: {e}", resolved.display()))
             })?;
             Ok(data)
+        })?;
+        Ok(fun)
+    }
+
+    fn make_io_open_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let root = self.workspace_root.clone();
+        let allow_writes = self.allow_writes;
+        let fun = lua.create_function(move |lua_ctx, (path, mode): (String, Option<String>)| {
+            let mode_str = mode.unwrap_or_else(|| "r".to_string());
+            let file_mode =
+                FileMode::parse(&mode_str).map_err(|err| mlua::Error::external(err.to_string()))?;
+            if file_mode.allows_write() && !allow_writes {
+                return Err(mlua::Error::external(
+                    "write helpers are disabled (set allow_tool_writes = true)",
+                ));
+            }
+            let resolved =
+                resolve_safe_path(&root, Path::new(&path)).map_err(mlua::Error::external)?;
+            let handle = LuaFileHandle::open(resolved, file_mode)
+                .map_err(|err| mlua::Error::external(format!("{err:#}")))?;
+            lua_ctx.create_userdata(handle)
+        })?;
+        Ok(fun)
+    }
+
+    fn make_io_lines_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let root = self.workspace_root.clone();
+        let fun = lua.create_function(move |lua_ctx, path: String| {
+            let resolved =
+                resolve_safe_path(&root, Path::new(&path)).map_err(mlua::Error::external)?;
+            let contents = fs::read_to_string(&resolved).map_err(|e| {
+                mlua::Error::external(format!("could not read {}: {e}", resolved.display()))
+            })?;
+            let lines = contents
+                .lines()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>();
+            let state = Rc::new(RefCell::new((lines, 0usize)));
+            let iterator_state = Rc::clone(&state);
+            let iter = lua_ctx.create_function(move |lua_ctx, ()| {
+                let mut borrow = iterator_state.borrow_mut();
+                if borrow.1 >= borrow.0.len() {
+                    return Ok(Value::Nil);
+                }
+                let line = borrow.0[borrow.1].clone();
+                borrow.1 += 1;
+                Ok(Value::String(lua_ctx.create_string(&line)?))
+            })?;
+            Ok(iter)
         })?;
         Ok(fun)
     }
@@ -427,8 +493,7 @@ fn resolve_safe_path(root: &Path, path: &Path) -> Result<PathBuf> {
         root.join(path)
     };
 
-    let normalized = candidate
-        .canonicalize()
+    let normalized = canonicalize_with_missing(&candidate)
         .with_context(|| format!("failed to access {}", candidate.display()))?;
 
     if !normalized.starts_with(root) {
@@ -436,6 +501,38 @@ fn resolve_safe_path(root: &Path, path: &Path) -> Result<PathBuf> {
     }
 
     Ok(normalized)
+}
+
+fn canonicalize_with_missing(path: &Path) -> io::Result<PathBuf> {
+    match path.canonicalize() {
+        Ok(value) => Ok(value),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let mut segments = Vec::<OsString>::new();
+            let mut current = path;
+            while !current.exists() {
+                let parent = current.parent().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "unable to canonicalize path without parent",
+                    )
+                })?;
+                let name = current.file_name().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "unable to canonicalize unnamed path segment",
+                    )
+                })?;
+                segments.push(name.to_os_string());
+                current = parent;
+            }
+            let mut normalized = current.canonicalize()?;
+            while let Some(segment) = segments.pop() {
+                normalized.push(segment);
+            }
+            Ok(normalized)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn render_value(value: Value) -> String {
@@ -467,4 +564,220 @@ fn table_to_string(table: &Table) -> String {
         }
     }
     format!("{{{}}}", items.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn io_open_supports_reading_files() -> Result<()> {
+        let tmp = tempdir()?;
+        let file = tmp.path().join("sample.txt");
+        fs::write(&file, "alpha\nbeta")?;
+        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let output = executor.run_script(
+            r#"
+            local f = io.open("sample.txt", "r")
+            local data = f:read("*a")
+            f:close()
+            return data
+        "#,
+        )?;
+        assert_eq!(output.value, "alpha\nbeta");
+        Ok(())
+    }
+
+    #[test]
+    fn io_open_respects_write_flag() -> Result<()> {
+        let tmp = tempdir()?;
+        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let err = executor.run_script(
+            r#"
+            local f = io.open("new.txt", "w")
+        "#,
+        );
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("write helpers are disabled")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn io_open_allows_creating_files_when_enabled() -> Result<()> {
+        let tmp = tempdir()?;
+        let executor = LuaExecutor::new(tmp.path(), true)?;
+        let output = executor.run_script(
+            r#"
+            local f = io.open("dir/example.txt", "w")
+            f:write("demo")
+            f:close()
+            return rust.read_file("dir/example.txt")
+        "#,
+        )?;
+        assert_eq!(output.value, "demo");
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileMode {
+    Read,
+    Write,
+    Append,
+}
+
+impl FileMode {
+    fn parse(input: &str) -> Result<Self, &'static str> {
+        let normalized = input.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "r" | "rb" => Ok(FileMode::Read),
+            "w" | "wb" => Ok(FileMode::Write),
+            "a" | "ab" => Ok(FileMode::Append),
+            _ => Err("unsupported io mode (expected r, w, or a)"),
+        }
+    }
+
+    fn allows_write(self) -> bool {
+        matches!(self, FileMode::Write | FileMode::Append)
+    }
+}
+
+#[derive(Debug)]
+struct LuaFileHandle {
+    path: PathBuf,
+    mode: FileMode,
+    cursor: usize,
+    buffer: String,
+    dirty: bool,
+    closed: bool,
+}
+
+impl LuaFileHandle {
+    fn open(path: PathBuf, mode: FileMode) -> Result<Self> {
+        let buffer = match mode {
+            FileMode::Read => fs::read_to_string(&path)
+                .with_context(|| format!("could not read {}", path.display()))?,
+            FileMode::Write => String::new(),
+            FileMode::Append => fs::read_to_string(&path).unwrap_or_default(),
+        };
+        Ok(Self {
+            path,
+            mode,
+            cursor: 0,
+            buffer,
+            dirty: false,
+            closed: false,
+        })
+    }
+
+    fn ensure_open(&self) -> Result<()> {
+        if self.closed {
+            bail!("file already closed");
+        }
+        Ok(())
+    }
+
+    fn ensure_can_read(&self) -> Result<()> {
+        if self.mode == FileMode::Write || self.mode == FileMode::Append {
+            bail!("file opened without read access");
+        }
+        Ok(())
+    }
+
+    fn ensure_can_write(&self) -> Result<()> {
+        if !self.mode.allows_write() {
+            bail!("file opened in read-only mode");
+        }
+        Ok(())
+    }
+
+    fn read_all(&mut self) -> String {
+        let slice = self.buffer[self.cursor..].to_string();
+        self.cursor = self.buffer.len();
+        slice
+    }
+
+    fn read_line(&mut self) -> Option<String> {
+        if self.cursor >= self.buffer.len() {
+            return None;
+        }
+        let remaining = &self.buffer[self.cursor..];
+        if let Some(pos) = remaining.find('\n') {
+            let line = &remaining[..pos];
+            self.cursor += pos + 1;
+            Some(line.trim_end_matches('\r').to_string())
+        } else {
+            let line = remaining.trim_end_matches('\r').to_string();
+            self.cursor = self.buffer.len();
+            Some(line)
+        }
+    }
+
+    fn write_data(&mut self, data: &str) -> Result<()> {
+        self.ensure_can_write()?;
+        self.buffer.push_str(data);
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        if self.mode.allows_write() && self.dirty {
+            if let Some(parent) = self.path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("could not create parent dirs for {}", self.path.display())
+                })?;
+            }
+            fs::write(&self.path, &self.buffer)
+                .with_context(|| format!("could not write {}", self.path.display()))?;
+        }
+        self.closed = true;
+        Ok(())
+    }
+}
+
+impl Drop for LuaFileHandle {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+impl UserData for LuaFileHandle {
+    fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
+        methods.add_method_mut("read", |lua_ctx, this, mode: Option<String>| {
+            this.ensure_open().map_err(mlua::Error::external)?;
+            this.ensure_can_read().map_err(mlua::Error::external)?;
+            let spec = mode.unwrap_or_else(|| "*l".into());
+            match spec.as_str() {
+                "*a" => {
+                    let data = this.read_all();
+                    Ok(Value::String(lua_ctx.create_string(&data)?))
+                }
+                "*l" => match this.read_line() {
+                    Some(line) => Ok(Value::String(lua_ctx.create_string(&line)?)),
+                    None => Ok(Value::Nil),
+                },
+                other => Err(mlua::Error::external(format!(
+                    "io.read mode `{other}` not supported (use \"*a\" or \"*l\")"
+                ))),
+            }
+        });
+
+        methods.add_method_mut("write", |_, this, data: String| {
+            this.ensure_open().map_err(mlua::Error::external)?;
+            this.write_data(&data).map_err(mlua::Error::external)?;
+            Ok(true)
+        });
+
+        methods.add_method_mut("close", |_, this, ()| {
+            this.flush().map_err(mlua::Error::external)?;
+            Ok(true)
+        });
+    }
 }

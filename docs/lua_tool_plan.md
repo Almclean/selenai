@@ -57,3 +57,18 @@ We will check off each box as we implement the corresponding work.
 - Tool calls now reuse `run_lua_script`, so stdout/stderr/log output is identical to manual `/lua` runs, and the tool log shows `Pending` → `ok/error` transitions with the script content captured before execution.
 - When write helpers are enabled we now queue each `lua_run_script` request and require the user to run `/tool run` (with optional entry id) to approve or `/tool skip` to cancel, ensuring the LLM can’t mutate files without an explicit confirmation step. Read-only setups continue to auto-run immediately.
 - Each queued request surfaces its reason/script in chat plus a tool-log entry, mirroring the transparency guidance from the Code Mode and MCP blogs.
+
+## Ergonomic `io` / `fs` shims
+
+The sandbox now exposes familiar `io.*` handles and `fs.*` helpers so the LLM can write idiomatic Lua without referencing `rust.*` directly. Everything still funnels through `resolve_safe_path`, so the safety model is unchanged.
+
+### Highlights
+- `io.open(path, mode?)` (modes `r`, `w`, `a`) returns a userdata handle that implements `:read("*a" | "*l")`, `:write(text)`, and `:close()`. Handles buffer contents in memory and flush on close or when dropped.
+- `io.lines(path)` yields an iterator over the file contents, implemented as a closure that walks an in-memory list of lines.
+- `fs.read`, `fs.write`, and `fs.list` are straightforward aliases for the existing `rust.*` helpers; they share the same gating behavior.
+- Write attempts still check `allow_tool_writes` before touching disk, and new tests cover read/write flows plus the gating errors.
+
+### Caveats
+- Only the most common modes are implemented for now; functions such as `io.popen`, binary modes (`rb`, `wb`), or mixed read/write (`r+`) still raise errors.
+- `io.lines` currently requires a file path (no default input handle), and iterators read the entire file before yielding.
+- `fs.exists` / `fs.is_dir` are not implemented yet; callers can fall back to `rust.list_dir` if needed.

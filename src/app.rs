@@ -306,13 +306,14 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
 
         if self.config.allow_tool_writes {
             prompt.push_str(
-                "The Lua sandbox can read and write within the workspace via helpers like `rust.read_file`, `rust.list_dir`, `rust.write_file`, `rust.http_request`, and `rust.log`. Use writes only after verifying the plan and results.\n",
+                "The Lua sandbox can read and write within the workspace via helpers like `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.write_file`, `rust.http_request`, and `rust.log`. Use writes only after verifying the plan and results.\n",
             );
         } else {
             prompt.push_str(
-                "The Lua sandbox is currently **read-only**. You may use helpers such as `rust.read_file`, `rust.list_dir`, `rust.http_request`, and `rust.log`, but do not attempt to write files.\n",
+                "The Lua sandbox is currently **read-only**. You may use helpers such as `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.http_request`, and `rust.log`, but do not attempt to write files.\n",
             );
         }
+        prompt.push_str("If you need third-party Lua helpers, vendor pure-Lua modules inside the workspace (e.g., `lua_libs/foo.lua`) and `load` them via `rust.read_file`—do not attempt global installs.\n");
 
         prompt.push_str(
             "Be transparent whenever you run code, cite what you executed, and double-check outputs before final answers.",
@@ -323,7 +324,7 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
 
     fn build_lua_tool(&self) -> LlmTool {
         let mut description = format!(
-            "Execute Lua code inside the user's workspace using `rust.*` helpers (read_file, list_dir, write_file, http_request, log, etc.). Use `{LLM_LUA_TOOL_NAME}` when you need to inspect files, gather context, and apply verified edits. Always explain why you need the script and summarize results afterward."
+            "Execute Lua code inside the user's workspace using the injected helpers (`io.*`, `fs.*`, and the lower-level `rust.*` functions for read_file, list_dir, write_file, http_request, log, etc.). Use `{LLM_LUA_TOOL_NAME}` when you need to inspect files, gather context, and apply verified edits. Always explain why you need the script and summarize results afterward."
         );
         if !self.config.allow_tool_writes {
             description
@@ -338,7 +339,7 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
                 "properties": {
                     "source": {
                         "type": "string",
-                        "description": "Lua script to execute. Prefer small, composable scripts that use the provided rust.* helpers."
+                        "description": "Lua script to execute. Prefer small, composable scripts."
                     },
                     "reason": {
                         "type": "string",

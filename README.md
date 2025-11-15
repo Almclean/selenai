@@ -12,6 +12,9 @@ write-capable scripts before they touch your workspace.
   locked-down Lua VM with explicit `rust.*` host functions for reading files,
   listing directories, making HTTP requests, and (optionally) writing paths
   inside the repo.
+- **Plain-Lua ergonomics** – familiar `io.*` handles and `fs.*` helpers are
+  pre-injected so the LLM can write idiomatic Lua and let the sandbox reroute
+  operations safely.
 - **Provider-agnostic LLM layer** – swap between the offline stub client and
   OpenAI by editing `selenai.toml` (or exporting `SELENAI_CONFIG`).
 - **Plan-first design ethos** – the default system prompt mirrors the guidance
@@ -77,6 +80,10 @@ See `docs/config.md` for the full reference.
 ---
 
 ## Working in the TUI
+SelenAI renders three stacked panes: **Conversation** (top), **Tool activity** (middle), and
+**Input** (bottom). The conversation pane accounts for wrapped lines so even long responses stay
+scrollable; borders disappear automatically in copy-friendly mode.
+
 ### Navigation & habits
 - `Tab` / `Shift+Tab` – switch between **Conversation**, **Tool activity**, and
   **Input** panes.
@@ -107,6 +114,8 @@ script execution auditable and reproducible:
 
 | Helper | Description |
 | ------ | ----------- |
+| `io.open`, `io.read`, `io.write`, `io.lines` | Standard Lua-style file handles backed by the sandbox. Write modes still honor the `allow_tool_writes` gate and flush on `:close()`. |
+| `fs.read`, `fs.write`, `fs.list` | Sugar wrappers over the `rust.*` helpers for quick one-off file or directory calls. |
 | `rust.read_file(path)` | Read UTF-8 files under the repo root (path traversal is blocked). |
 | `rust.list_dir(path)` | Return metadata about direct children of a directory. |
 | `rust.write_file(path, contents)` | Write files inside the repo when `allow_tool_writes = true`; parents are created automatically. |
@@ -116,8 +125,8 @@ script execution auditable and reproducible:
 | `rust.mcp.list_servers()` / `list_tools(server)` / `load_tool(server, tool)` | Explore helper files under `servers/`. |
 | `print(...)` / `warn(...)` | Captured as stdout/stderr in the UI. |
 
-Globals such as `os`, `io`, and unrestricted `require` are removed; only the
-whitelisted helpers above are available. Each run returns:
+Globals such as `os` and unrestricted `require` remain disabled; only the helpers
+above (plus the sandboxed `require("rust")`) are exposed. Each run returns:
 
 ```
 Return value: <stringified Lua value>
@@ -132,6 +141,11 @@ logs:
 When write helpers are enabled, every automatically requested tool run is queued
 until you explicitly approve it via `/tool run` to keep the LLM honest about
 mutating your workspace.
+
+**Third-party Lua modules:** If you need additional pure-Lua libraries, vendor
+them under the repository (e.g., `lua_libs/json.lua`) and load them with
+`load(rust.read_file("lua_libs/json.lua"), "json", "t", {})()`. Global installs
+or networked `require` calls remain disabled by design.
 
 ---
 

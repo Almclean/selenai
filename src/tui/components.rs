@@ -44,8 +44,10 @@ pub fn render_chat(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let mut title = "Conversation".to_string();
-    let inner_height = area.height.saturating_sub(2).max(1);
-    let total_lines = lines.len() as u16;
+    let border_padding = if state.copy_mode { 0 } else { 2 };
+    let inner_height = area.height.saturating_sub(border_padding).max(1);
+    let inner_width = area.width.saturating_sub(border_padding).max(1);
+    let total_lines = estimate_wrapped_height(&lines, inner_width);
     let baseline = total_lines.saturating_sub(inner_height);
     let offset_from_bottom = state.chat_scroll.min(baseline);
     let scroll_top = baseline.saturating_sub(offset_from_bottom);
@@ -151,4 +153,29 @@ fn append_multiline(lines: &mut Vec<Line>, text: &str) {
             break;
         }
     }
+}
+
+fn estimate_wrapped_height(lines: &[Line], width: u16) -> u16 {
+    if width == 0 {
+        return lines.len() as u16;
+    }
+    let usable_width = width as usize;
+    let mut total: u32 = 0;
+    for line in lines {
+        let height = estimate_line_height(line, usable_width) as u32;
+        total = total.saturating_add(height);
+    }
+    total.min(u16::MAX as u32) as u16
+}
+
+fn estimate_line_height(line: &Line, width: usize) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let line_width = line.width();
+    if line_width == 0 {
+        return 1;
+    }
+    let rows = (line_width + width - 1) / width;
+    rows.min(u16::MAX as usize) as u16
 }
