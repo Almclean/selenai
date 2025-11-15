@@ -35,7 +35,7 @@ jobs:
         run: cargo test --all --locked
 
       - name: Coverage (tarpaulin)
-        uses: actions-rs/tarpaulin@v1
+        uses: actions-rs/tarpaulin@v0.1
         with:
           version: '0.34.1'
           args: '--workspace --timeout 180'
