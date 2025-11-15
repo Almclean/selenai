@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -691,15 +691,9 @@ fn build_llm_client(config: &AppConfig) -> Result<Arc<dyn LlmClient>> {
 
 fn build_openai_config(config: &AppConfig) -> Result<OpenAiConfig> {
     let openai = &config.openai;
-    let api_key = openai
-        .api_key
-        .clone()
-        .or_else(|| env::var("OPENAI_API_KEY").ok())
-        .ok_or_else(|| {
-            anyhow!(
-                "OpenAI provider selected but no API key configured. Set `openai.api_key` in selenai.toml or `OPENAI_API_KEY`."
-            )
-        })?;
+    let api_key = env::var("OPENAI_API_KEY").context(
+        "OpenAI provider selected but no API key configured. Set OPENAI_API_KEY (for example in your .env file).",
+    )?;
     let base_url = openai
         .base_url
         .clone()

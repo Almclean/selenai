@@ -19,11 +19,11 @@ allow_tool_writes = false
 
 [openai]
 # Optional overrides; env vars OPENAI_API_KEY / OPENAI_BASE_URL etc. are also honored.
-# api_key = "sk-..."
+# OPENAI_API_KEY now comes from .env / the shell environment.
 # base_url = "https://api.openai.com/v1"
 # organization = ""
 # project = ""
 ```
 
-Any field left blank falls back to safe defaults. When `provider = "openai"`, you must supply an
-API key either in the `[openai]` table or via the standard OpenAI environment variables.
+Any field left blank falls back to safe defaults. When `provider = "openai"`, set `OPENAI_API_KEY`
+either in your shell or by creating a `.env` file (automatically loaded on startup).

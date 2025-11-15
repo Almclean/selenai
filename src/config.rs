@@ -65,7 +65,6 @@ impl Default for ProviderKind {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct OpenAiSection {
-    pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub organization: Option<String>,
     pub project: Option<String>,

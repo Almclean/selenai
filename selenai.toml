@@ -1,0 +1,4 @@
+provider = "openai"
+model_id = "gpt-5.1"
+streaming = true
+allow_tool_writes = false

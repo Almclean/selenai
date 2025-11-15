@@ -63,11 +63,14 @@ streaming = true         # request incremental deltas when supported
 allow_tool_writes = false
 
 [openai]
-# api_key = "sk-..."; env var OPENAI_API_KEY wins otherwise
+# API keys now live in OPENAI_API_KEY (set it in .env or export it before running).
 # base_url = "https://api.openai.com/v1"
 # organization = ""
 # project = ""
 ```
+
+SelenAI automatically loads a `.env` file from the workspace root (if present) before
+reading configuration, so you can keep `OPENAI_API_KEY` and friends out of version control.
 
 Environment variables:
 - `SELENAI_CONFIG` – path to the config file (defaults to `./selenai.toml`).
@@ -222,9 +225,8 @@ current roadmap and guardrails around tool execution UX.
 ---
 
 ## Troubleshooting
-- **“OpenAI chat failed (401)”** – confirm `OPENAI_API_KEY` is set or the
-  `[openai]` table includes a valid `api_key`. Also check organization/project
-  headers if your account requires them.
+- **“OpenAI chat failed (401)”** – confirm `OPENAI_API_KEY` is set (for example via `.env`).
+  Also check organization/project headers if your account requires them.
 - **Lua helper says “write helpers are disabled”** – flip `allow_tool_writes` to
   `true` in your config *and* approve the run with `/tool run`.
 - **The UI is blank or keyboard is stuck** – ensure the terminal supports
