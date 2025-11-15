@@ -239,8 +239,8 @@ impl App {
     }
 
     fn invoke_llm(&mut self) {
-        let system_prompt = self.build_system_prompt();
-        let lua_tool = self.build_lua_tool();
+        let system_prompt = Self::build_system_prompt(&self.config);
+        let lua_tool = Self::build_lua_tool(&self.config);
         let mut request = ChatRequest::new(self.state.messages.clone())
             .with_system_prompt(system_prompt)
             .with_tool(lua_tool);
@@ -293,7 +293,7 @@ impl App {
         }
     }
 
-    fn build_system_prompt(&self) -> String {
+    fn build_system_prompt(config: &AppConfig) -> String {
         let mut prompt = format!(
             "You are SelenAI, a terminal-based AI pair programmer. You can analyze the current repository and MUST aggressively use the `{LLM_LUA_TOOL_NAME}` tool to run Lua code inside a sandboxed helper VM whenever you need information or validation. Do not guess when you can fetch real data from code execution.\n\n\
 Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidance):\n\
@@ -304,7 +304,7 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
 - If a run fails, explain what happened and adjust.\n\n"
         );
 
-        if self.config.allow_tool_writes {
+        if config.allow_tool_writes {
             prompt.push_str(
                 "The Lua sandbox can read and write within the workspace via helpers like `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.write_file`, `rust.http_request`, and `rust.log`. Use writes only after verifying the plan and results.\n",
             );
@@ -322,11 +322,11 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
         prompt
     }
 
-    fn build_lua_tool(&self) -> LlmTool {
+    fn build_lua_tool(config: &AppConfig) -> LlmTool {
         let mut description = format!(
             "Execute Lua code inside the user's workspace using the injected helpers (`io.*`, `fs.*`, and the lower-level `rust.*` functions for read_file, list_dir, write_file, http_request, log, etc.). Use `{LLM_LUA_TOOL_NAME}` when you need to inspect files, gather context, and apply verified edits. Always explain why you need the script and summarize results afterward."
         );
-        if !self.config.allow_tool_writes {
+        if !config.allow_tool_writes {
             description
                 .push_str(" File writes are disabled; limit scripts to read-only inspection.");
         }
@@ -1077,6 +1077,46 @@ mod tests {
         }
     }
 
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
+    fn build_system_prompt_mentions_write_policy() {
+        let mut cfg = AppConfig::default();
+        cfg.allow_tool_writes = false;
+        let prompt = App::build_system_prompt(&cfg);
+        assert!(
+            prompt.contains("read-only"),
+            "prompt should mention read-only mode:\n{prompt}"
+        );
+
+        cfg.allow_tool_writes = true;
+        let prompt = App::build_system_prompt(&cfg);
+        assert!(
+            prompt.contains("can read and write"),
+            "prompt should mention write access:\n{prompt}"
+        );
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
+    fn build_lua_tool_reflects_config() {
+        let mut cfg = AppConfig::default();
+        cfg.allow_tool_writes = false;
+        let tool = App::build_lua_tool(&cfg);
+        assert_eq!(tool.name, LLM_LUA_TOOL_NAME);
+        assert!(
+            tool.description.contains("read-only inspection"),
+            "description should warn about read-only mode"
+        );
+        assert_eq!(tool.parameters["required"], serde_json::json!(["source"]));
+
+        cfg.allow_tool_writes = true;
+        let tool = App::build_lua_tool(&cfg);
+        assert!(
+            !tool.description.contains("read-only inspection"),
+            "write-enabled configs should not append read-only warning"
+        );
+    }
+
     #[test]
     fn parse_lua_command_handles_whitespace() {
         assert_eq!(parse_lua_command("   /lua   return 1"), Some("return 1"));
@@ -1143,5 +1183,55 @@ mod tests {
         assert_eq!(offset, 1);
         adjust_chat_scroll(&mut offset, 10); // clamp at 0
         assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn push_message_with_index_tracks_position() {
+        let mut state = AppState::default();
+        let idx = state.push_message_with_index(Message::new(Role::User, "next"));
+        assert_eq!(idx, 1, "default state starts with welcome message");
+        assert_eq!(state.messages[idx].content, "next");
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
+    fn remove_message_updates_scroll() {
+        let mut state = AppState::default();
+        state.chat_scroll = 5;
+        let original_len = state.messages.len();
+        state.remove_message(0);
+        assert_eq!(state.messages.len(), original_len - 1);
+        assert_eq!(state.chat_scroll, 0);
+    }
+
+    #[test]
+    fn append_tool_call_appends_invocation() {
+        let mut state = AppState::default();
+        let idx = state.push_message_with_index(Message::new(Role::Assistant, "running tool"));
+        let invocation =
+            ToolInvocation::from_parts("demo", serde_json::json!({"value": 1}), Some("abc".into()));
+        state.append_tool_call(idx, invocation.clone());
+        assert_eq!(state.messages[idx].tool_calls.len(), 1);
+        assert_eq!(state.messages[idx].tool_calls[0].name, invocation.name);
+    }
+
+    #[test]
+    fn message_is_empty_checks_bounds() {
+        let mut state = AppState::default();
+        let idx = state.push_message_with_index(Message::new(Role::Assistant, ""));
+        assert!(state.message_is_empty(idx));
+        assert!(state.message_is_empty(usize::MAX));
+    }
+
+    #[test]
+    fn render_tool_invocation_includes_metadata() {
+        let invocation = ToolInvocation::from_parts(
+            "lua_run_script",
+            serde_json::json!({"source":"return 1"}),
+            Some("call_1".into()),
+        );
+        let message = render_tool_invocation(invocation);
+        assert!(message.content.contains("call_id: call_1"));
+        assert!(message.content.contains("lua_run_script"));
     }
 }

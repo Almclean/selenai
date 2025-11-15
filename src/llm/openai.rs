@@ -555,4 +555,47 @@ mod tests {
             other => panic!("expected tool call, got {other:?}"),
         }
     }
+
+    #[test]
+    fn truncate_payload_limits_length() {
+        let short = truncate_payload("hello");
+        assert_eq!(short, "hello");
+        let long = "a".repeat(600);
+        let truncated = truncate_payload(&long);
+        assert!(truncated.ends_with('…'));
+        assert_eq!(truncated.len(), 500 + "…".len());
+    }
+
+    #[test]
+    fn log_payload_respects_env_flag() {
+        unsafe {
+            std::env::set_var("SELENAI_DEBUG_OPENAI", "1");
+        }
+        log_payload(&serde_json::json!({"ping": "pong"}));
+        unsafe {
+            std::env::remove_var("SELENAI_DEBUG_OPENAI");
+        }
+    }
+
+    #[test]
+    fn finalize_tool_calls_emits_pending_invocations() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut map: HashMap<usize, ToolCallState> = HashMap::new();
+        let state = ToolCallState {
+            name: Some("lua_run_script".into()),
+            arguments: r#"{"source":"return 1"}"#.into(),
+            call_id: Some("call_1".into()),
+        };
+        map.insert(0, state);
+        finalize_tool_calls(&mut map, &tx);
+        let event = rx.try_recv().expect("tool call");
+        match event {
+            StreamEvent::ToolCall(invocation) => {
+                assert_eq!(invocation.name, "lua_run_script");
+                assert_eq!(invocation.call_id.as_deref(), Some("call_1"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(map.is_empty());
+    }
 }

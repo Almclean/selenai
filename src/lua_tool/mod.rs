@@ -686,6 +686,48 @@ mod tests {
     }
 
     #[test]
+    fn list_dir_returns_entries() -> Result<()> {
+        let tmp = tempdir()?;
+        fs::write(tmp.path().join("one.txt"), "1")?;
+        fs::create_dir(tmp.path().join("dir"))?;
+        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let output = executor.run_script(
+            r#"
+            local entries = rust.list_dir(".")
+            local names = {}
+            for i = 1, #entries do
+                table.insert(names, entries[i].name)
+            end
+            table.sort(names)
+            return table.concat(names, ",")
+        "#,
+        )?;
+        assert!(
+            output.value.contains("dir") && output.value.contains("one.txt"),
+            "expected both entries in output: {}",
+            output.value
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rust_log_records_messages() -> Result<()> {
+        let tmp = tempdir()?;
+        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let output = executor.run_script(
+            r#"
+            rust.log("note")
+            rust.log({ level = "warn", message = "warned" })
+            return "ok"
+        "#,
+        )?;
+        assert_eq!(output.logs.len(), 2);
+        assert_eq!(output.logs[0], "[info] note");
+        assert_eq!(output.logs[1], "[warn] warned");
+        Ok(())
+    }
+
+    #[test]
     fn file_mode_parse_supports_core_modes() {
         assert!(matches!(FileMode::parse("r").unwrap(), FileMode::Read));
         assert!(matches!(FileMode::parse("w").unwrap(), FileMode::Write));

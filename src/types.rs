@@ -125,3 +125,43 @@ impl ToolLogEntry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_display_names_are_human_readable() {
+        assert_eq!(Role::User.display_name(), "You");
+        assert_eq!(Role::Assistant.display_name(), "Assistant");
+        assert_eq!(Role::Tool.display_name(), "Tool");
+    }
+
+    #[test]
+    fn tool_status_strings_match_display() {
+        for (status, label) in [
+            (ToolStatus::Pending, "pending"),
+            (ToolStatus::Success, "ok"),
+            (ToolStatus::Error, "error"),
+        ] {
+            assert_eq!(status.as_str(), label);
+            assert_eq!(status.to_string(), label);
+        }
+    }
+
+    #[test]
+    fn tool_invocation_serializes_to_openai_shape() {
+        let invocation = ToolInvocation::from_parts(
+            "lua_run_script",
+            serde_json::json!({"source": "return 1"}),
+            Some("call_123".into()),
+        );
+        let json = invocation.to_openai_tool_call();
+        assert_eq!(json["function"]["name"], "lua_run_script");
+        assert_eq!(json["id"], "call_123");
+        assert_eq!(
+            json["function"]["arguments"],
+            serde_json::json!(r#"{"source":"return 1"}"#)
+        );
+    }
+}

@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -19,11 +22,15 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load() -> Result<Self> {
         let path = config_path_from_env();
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
 
-        let data = fs::read_to_string(&path)
+        let data = fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
         let mut cfg: AppConfig = toml::from_str(&data)
             .with_context(|| format!("invalid config format in {}", path.display()))?;
@@ -69,4 +76,49 @@ fn config_path_from_env() -> PathBuf {
     std::env::var("SELENAI_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_BASENAME))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn with_temp_config<F: FnOnce(&PathBuf)>(contents: Option<&str>, f: F) {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("selenai-test.toml");
+        if let Some(data) = contents {
+            fs::write(&path, data).expect("write config");
+        }
+        f(&path);
+    }
+
+    #[test]
+    fn load_returns_defaults_when_missing() {
+        with_temp_config(None, |path| {
+            let cfg = AppConfig::load_from_path(path).expect("default config");
+            assert_eq!(cfg.model_id, DEFAULT_MODEL_ID);
+            assert!(matches!(cfg.provider, ProviderKind::Stub));
+        });
+    }
+
+    #[test]
+    fn load_normalizes_blank_model_id() {
+        with_temp_config(
+            Some(
+                r#"
+provider = "openai"
+model_id = ""
+streaming = false
+"#,
+            ),
+            |path| {
+                let cfg = AppConfig::load_from_path(path).expect("config");
+                assert_eq!(cfg.model_id, DEFAULT_MODEL_ID);
+                assert!(
+                    !cfg.streaming,
+                    "explicit streaming flag should be preserved"
+                );
+            },
+        );
+    }
 }

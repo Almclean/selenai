@@ -179,3 +179,24 @@ fn estimate_line_height(line: &Line, width: usize) -> u16 {
     let rows = line_width.div_ceil(width);
     rows.min(u16::MAX as usize) as u16
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_multiline_splits_text() {
+        let mut lines = Vec::new();
+        append_multiline(&mut lines, "one\ntwo\n");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], Line::from("one"));
+        assert_eq!(lines[1], Line::from("two"));
+    }
+
+    #[test]
+    fn estimate_wrapped_height_accounts_for_width() {
+        let lines = vec![Line::from("abcdef")];
+        assert_eq!(estimate_wrapped_height(&lines, 3), 2);
+        assert_eq!(estimate_wrapped_height(&lines, 10), 1);
+    }
+}
