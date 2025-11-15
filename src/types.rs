@@ -84,7 +84,7 @@ impl ToolInvocation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolStatus {
     Pending,
     Success,
@@ -107,7 +107,7 @@ impl fmt::Display for ToolStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolLogEntry {
     pub id: usize,
     pub title: String,

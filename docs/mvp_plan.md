@@ -130,7 +130,7 @@ src/
 7. **Hardening**
  - Expand Lua sandbox (write, HTTP).
  - Add tests for host functions and guardrails.
- - Persist conversation transcripts if desired.
+ - Persist conversation transcripts and tool logs to disk (e.g., `.selenai/logs/`) alongside metadata describing whether writes were enabled.
 
 ## Near-Term Next Steps
 1. Land the LLM abstraction (trait + request/response + streaming events) and move the stub client onto it.

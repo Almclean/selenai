@@ -24,6 +24,7 @@ use crate::{
         openai::{OpenAiClient, OpenAiConfig},
     },
     lua_tool::{LuaExecution, LuaExecutor},
+    session::SessionRecorder,
     tui,
     types::{Message, Role, ToolInvocation, ToolLogEntry, ToolStatus},
 };
@@ -36,6 +37,7 @@ pub struct App {
     llm: Arc<dyn LlmClient>,
     runtime: Runtime,
     lua: LuaExecutor,
+    session: SessionRecorder,
     should_quit: bool,
     next_tool_id: usize,
     active_stream: Option<ActiveStream>,
@@ -56,12 +58,22 @@ impl App {
             ));
         }
         let allow_writes = config.allow_tool_writes;
+        let log_root = config.resolve_log_dir(&workspace);
+        let session = SessionRecorder::new(&log_root, config.allow_tool_writes)?;
+        state.push_message(Message::new(
+            Role::Assistant,
+            format!(
+                "Session transcripts + tool logs will be saved under {}.",
+                session.session_dir().display()
+            ),
+        ));
         Ok(Self {
             config,
             state,
             llm,
             runtime,
             lua: LuaExecutor::new(workspace, allow_writes)?,
+            session,
             should_quit: false,
             next_tool_id: 0,
             active_stream: None,
@@ -83,7 +95,11 @@ impl App {
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
         terminal.show_cursor()?;
 
-        result
+        let persist_result = self
+            .session
+            .persist(&self.state.messages, &self.state.tool_logs);
+
+        result.and(persist_result)
     }
 
     fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {

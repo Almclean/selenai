@@ -20,6 +20,8 @@ write-capable scripts before they touch your workspace.
 - **Plan-first design ethos** – the default system prompt mirrors the guidance
   from Cloudflare’s Code Mode + Anthropic’s MCP posts: plan → run tools →
   inspect → edit, and always explain the scripts you are about to execute.
+- **Persisted session logs** – every run leaves behind chat transcripts and tool
+  logs under `.selenai/logs` (configurable) so you can review or diff later.
 
 ---
 
@@ -65,6 +67,7 @@ provider = "openai"      # or "stub" for offline usage
 model_id = "gpt-4o-mini" # passed through to the provider
 streaming = true         # request incremental deltas when supported
 allow_tool_writes = false
+log_dir = ".selenai/logs" # per-session transcripts + tool logs
 
 [openai]
 # API keys now live in OPENAI_API_KEY (set it in .env or export it before running).
@@ -81,6 +84,8 @@ Environment variables:
 - `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG`, `OPENAI_PROJECT` – used
   when `provider = "openai"` and not overridden in the file.
 - `SELENAI_DEBUG_OPENAI=1` – dump REST payloads to stderr for debugging.
+- `SELENAI_LOG_DIR` is unnecessary now that `log_dir` lives in the config, but
+  you can still point `log_dir` at an absolute path if you want logs elsewhere.
 
 See `docs/config.md` for the full reference.
 
@@ -112,6 +117,12 @@ scrollable; borders disappear automatically in copy-friendly mode.
 When `streaming = true` and the provider supports it, assistant responses appear
 incrementally. Tool calls triggered mid-stream show up in both the chat pane and
 tool log with the Lua source, reason, and current status.
+
+### Session logs
+Exiting the app writes a JSONL transcript of the chat plus the tool log to the
+directory configured via `log_dir` (default `.selenai/logs`). Each run gets a
+timestamped subdirectory that also records whether Lua writes were enabled, so
+you can review exactly what happened later.
 
 ---
 

@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod llm;
 mod lua_tool;
+mod session;
 mod tui;
 mod types;
 
