@@ -211,6 +211,12 @@ The agent loop always:
 - **Build / run:** `cargo run` (add `--release` for longer sessions).
 - **Tests:** `cargo test` covers configuration parsing, tool request handling,
   and OpenAI payload generation.
+- **Coverage:** `cargo tarpaulin` is available out of the box for quick line
+  coverage sweeps (it takes a couple extra seconds to spin up the sandboxed
+  Lua runtime but needs no additional setup).
+- **CI:** pushes and PRs run `cargo fmt`, `cargo clippy`, `cargo test`, and
+  `cargo tarpaulin` via `.github/workflows/ci.yml` so regressions are caught
+  automatically.
 - **Style:** Edition 2024 + `rustfmt` defaults. Favor small, focused modules and
   return `anyhow::Result` from fallible paths.
 - **Debugging:** set `RUST_LOG` as needed; use `SELENAI_DEBUG_OPENAI=1` to print

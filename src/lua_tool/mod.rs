@@ -621,6 +621,69 @@ mod tests {
         assert_eq!(output.value, "demo");
         Ok(())
     }
+
+    #[test]
+    fn resolve_safe_path_stays_within_root() -> Result<()> {
+        let tmp = tempdir()?;
+        let target = tmp.path().join("dir/example.txt");
+        fs::create_dir_all(target.parent().unwrap())?;
+        fs::write(&target, "hello")?;
+        let resolved = resolve_safe_path(tmp.path(), Path::new("dir/example.txt"))?;
+        assert_eq!(resolved, target.canonicalize()?);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_safe_path_rejects_escape() {
+        let tmp = tempdir().expect("tempdir");
+        let result = resolve_safe_path(tmp.path(), Path::new("../outside.txt"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("escapes workspace root")
+        );
+    }
+
+    #[test]
+    fn http_request_helper_handles_basic_request() -> Result<()> {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer);
+                let response =
+                    b"HTTP/1.1 200 OK\r\nX-Test-Header: Pong\r\nContent-Length: 4\r\n\r\npong";
+                let _ = stream.write_all(response);
+            }
+        });
+
+        let tmp = tempdir()?;
+        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let script = format!(
+            r#"
+            local resp = rust.http_request{{
+                url = "http://{addr}/ping",
+                method = "POST",
+                headers = {{ ["X-Demo"] = "value" }},
+                body = "ping"
+            }}
+            return resp.status .. ":" .. resp.body
+        "#,
+            addr = addr
+        );
+        let output = executor.run_script(&script)?;
+        assert_eq!(output.value.trim(), "200:pong");
+        handle.join().expect("server thread");
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

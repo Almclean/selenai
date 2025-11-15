@@ -361,7 +361,11 @@ struct ToolCallState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Message, Role};
+    use crate::{
+        llm::StreamEvent,
+        types::{Message, Role},
+    };
+    use tokio::sync::mpsc;
 
     fn test_client() -> OpenAiClient {
         OpenAiClient::new(OpenAiConfig {
@@ -468,5 +472,87 @@ mod tests {
             .expect("messages");
         assert_eq!(messages.len(), 2);
         assert!(messages[1].get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn parse_chat_response_returns_plain_text() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello!"
+                }
+            }]
+        });
+        let response = parse_chat_response(&body).expect("parsed");
+        match response {
+            ChatResponse::Assistant(message) => assert_eq!(message.content, "Hello!"),
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_chat_response_yields_tool_call() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lua_run_script",
+                            "arguments": "{\"source\":\"return 1\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let response = parse_chat_response(&body).expect("parsed");
+        match response {
+            ChatResponse::ToolCall(invocation) => {
+                assert_eq!(invocation.name, "lua_run_script");
+                assert_eq!(invocation.call_id.as_deref(), Some("call_1"));
+                assert_eq!(invocation.arguments["source"], "return 1");
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_stream_chunk_emits_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "Hello",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_99",
+                        "function": {
+                            "name": "lua_run_script",
+                            "arguments": "{\"source\":\"return 1\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let mut tool_state: std::collections::HashMap<usize, ToolCallState> =
+            std::collections::HashMap::new();
+        handle_stream_chunk(&chunk, &tx, &mut tool_state).expect("stream chunk");
+        let first = rx.try_recv().expect("delta event");
+        match first {
+            StreamEvent::Delta(text) => assert_eq!(text, "Hello"),
+            other => panic!("expected delta, got {other:?}"),
+        }
+        let second = rx.try_recv().expect("tool call event");
+        match second {
+            StreamEvent::ToolCall(invocation) => {
+                assert_eq!(invocation.name, "lua_run_script");
+                assert_eq!(invocation.call_id.as_deref(), Some("call_99"));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
     }
 }

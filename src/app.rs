@@ -1076,4 +1076,44 @@ mod tests {
             other => panic!("unexpected parse result: {other:?}"),
         }
     }
+
+    #[test]
+    fn app_state_append_resets_scroll() {
+        let mut state = AppState::default();
+        state.chat_scroll = 7;
+        let original = state.messages[0].content.clone();
+        state.append_to_message(0, " extra");
+        assert!(state.messages[0].content.ends_with(" extra"));
+        assert_ne!(state.messages[0].content, original);
+        assert_eq!(state.chat_scroll, 0);
+    }
+
+    #[test]
+    fn app_state_updates_tool_log_entries() {
+        let mut state = AppState::default();
+        state
+            .tool_logs
+            .push(ToolLogEntry::new(42, "demo", "pending detail"));
+        state.update_tool_log(42, ToolStatus::Success, "done");
+        assert_eq!(state.tool_logs[0].status, ToolStatus::Success);
+        assert_eq!(state.tool_logs[0].detail, "done");
+    }
+
+    #[test]
+    fn input_state_handles_utf8_navigation() {
+        let mut input = InputState::default();
+        input.insert_char('你');
+        input.insert_char('好');
+        assert_eq!(input.buffer(), "你好");
+        input.move_left();
+        input.backspace();
+        assert_eq!(input.buffer(), "好");
+        input.move_to_start();
+        input.insert_char('!');
+        assert_eq!(input.buffer(), "!好");
+        input.move_to_end();
+        input.delete_char();
+        assert_eq!(input.buffer(), "!好");
+        assert!(input.cursor_display_offset() > 0);
+    }
 }
