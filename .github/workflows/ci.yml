@@ -40,4 +40,5 @@ jobs:
         uses: actions-rs/tarpaulin@v0.1
         with:
           toolchain: stable
+          version: '0.1.3'
           args: '--workspace --timeout 180'
