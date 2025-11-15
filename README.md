@@ -23,6 +23,10 @@ write-capable scripts before they touch your workspace.
 
 ---
 
+## Code Coverage
+
+[![codecov](https://codecov.io/github/Almclean/selenai/graph/badge.svg?token=3S8BPSQJ7A)](https://codecov.io/github/Almclean/selenai)
+
 ## Quick Start
 1. **Install prerequisites**
    - Rust toolchain (edition 2024; `rustup default stable` is sufficient).
