@@ -34,8 +34,8 @@ jobs:
       - name: Cargo test
         run: cargo test --all --locked
 
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
-
       - name: Coverage (tarpaulin)
-        run: cargo tarpaulin --workspace --timeout 180
+        uses: actions-rs/tarpaulin@v1
+        with:
+          version: '0.34.1'
+          args: '--workspace --timeout 180'
