@@ -10,20 +10,21 @@ use ratatui::{
 use crate::app::{AppState, FocusTarget};
 
 pub fn draw(frame: &mut Frame, state: &AppState) {
-    let layout = Layout::default()
+    let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(10),
-            Constraint::Length(7),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(10), Constraint::Length(3)])
         .split(frame.size());
 
-    components::render_chat(frame, layout[0], state);
-    components::render_tool_logs(frame, layout[1], state);
-    components::render_input(frame, layout[2], state);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(vertical[0]);
 
-    render_focus_hint(frame, layout[2], state.focus);
+    components::render_chat(frame, horizontal[0], state);
+    components::render_tool_logs(frame, horizontal[1], state);
+    components::render_input(frame, vertical[1], state);
+
+    render_focus_hint(frame, vertical[1], state.focus);
 }
 
 fn render_focus_hint(frame: &mut Frame, area: Rect, focus: FocusTarget) {

@@ -6,6 +6,7 @@ The MVP is stable; this plan prioritizes safer write flows, richer toolchains, a
 - Streaming robustness: tighten `src/app.rs` state transitions; add tests for mid-stream tool emissions, cancellations, and partial outputs.
 - Session hygiene: predictable log naming/rotation under `.selenai/logs`; optional redaction hook for secrets before writing transcripts.
 - Lua sandbox hardening: stricter path guards (symlink detection, max file size) plus denial-case tests in `src/lua_tool/`.
+- Tool layout: widen tool real estate by rendering Chat and Tool panes side by side, with the input pane anchored at the bottom for more comfortable multi-turn editing.
 
 ## Capability Expansions
 - Multi-tool pipeline: support multiple approved tool runs per turn with a queued/parallel view in `tui/`, enabling batch reads followed by a single write.
