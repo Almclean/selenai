@@ -2,7 +2,8 @@
 
 Thanks for helping shape the terminal-first AI pair-programmer! This doc
 describes how to get a dev environment running, how to work with the sandboxed
-Lua helpers, and what we look for in pull requests.
+Lua helpers, and what we look for in pull requests. For a concise checklist,
+see [AGENTS.md](AGENTS.md).
 
 ## Prerequisites
 - Rust toolchain (2024 edition). `rustup default stable` works fine.

@@ -277,7 +277,8 @@ current roadmap and guardrails around tool execution UX.
 ## Contributing
 Issues and pull requests are welcome! See
 [CONTRIBUTING.md](CONTRIBUTING.md) for local setup steps, testing tips, and
-guidelines for adding Lua helpers or provider integrations.
+guidelines for adding Lua helpers or provider integrations. For a concise
+contributor guide, skim [AGENTS.md](AGENTS.md).
 
 ## Additional Reading
 - `docs/mvp_plan.md` – big-picture roadmap, architecture, and testing strategy.
