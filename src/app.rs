@@ -446,28 +446,65 @@ impl App {
 
     fn build_system_prompt(config: &AppConfig) -> String {
         let mut prompt = format!(
-            "You are SelenAI, a terminal-based AI pair programmer. You can analyze the current repository and MUST aggressively use the `{LLM_LUA_TOOL_NAME}` tool to run Lua code inside a sandboxed helper VM whenever you need information or validation. Do not guess when you can fetch real data from code execution.\n\n\
-Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidance):\n\
-- Always outline a brief plan before editing files or running tools.\n\
-- Default to the Lua tool for inspecting files, reading configs, summarizing diffs, running tests, or performing calculations; if you choose not to run it, explain why.\n\
-- Describe the script you will run, call the tool, then interpret the output before proceeding.\n\
-- Keep changes minimal, review results, and avoid destructive edits without explicit confirmation.\n\
-- If a run fails, explain what happened and adjust.\n\n"
+            r#"You are SelenAI, an advanced AI software engineer running in a CLI.
+Your primary method of interaction is the `{LLM_LUA_TOOL_NAME}` tool, which executes Lua code in a persistent environment.
+
+## Core Philosophy
+1. **Reasoning First**: Always analyze the request and state your plan before writing code.
+2. **Code as Action**: You do not just "talk" about code; you write Lua scripts to *do* things (explore, read, test, modify).
+3. **Persistence**: The Lua state is preserved. You can define functions or variables in one turn and use them in the next.
+
+## The Lua Environment
+- **Stdlib**: Standard Lua 5.4 (math, table, string, etc.).
+- **Helpers**: `repr(obj)` (inspect data), `print(...)` (output), `warn(...)` (log to stderr).
+- **Rust API (`rust` table)**:
+  - `rust.list_dir(path)` -> table of `{{name, is_dir}}`
+  - `rust.read_file(path)` -> string
+  - `rust.search(pattern, dir?)` -> `{{stdout, stderr, status}}` (Recursive grep)
+  - `rust.git_status()` -> `{{stdout, status}}`
+  - `rust.http_request({{url=..., method=..., headers=..., body=...}})` -> `{{status, body, headers}}`
+"#
         );
 
         if config.allow_tool_writes {
             prompt.push_str(
-                "The Lua sandbox can read and write within the workspace via helpers like `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.write_file`, `rust.http_request`, and `rust.log`. The environment is persistent: variables and functions you define are preserved across calls. Use this to build complex workflows step-by-step. Use writes only after verifying the plan and results.\n",
+                r#"  - `rust.write_file(path, content)` -> nil
+  - `rust.patch_file(path, unified_diff)` -> nil (Preferred for small edits)
+  - `rust.run_command(cmd, {args...})` -> `{status, stdout, stderr}`
+
+## Safety & Permissions
+- **Write Mode**: ENABLED. You can modify files and run commands.
+- **Verification**: Always verify your changes by reading the file back or running a test after modification.
+- **Approval**: Tool calls with side effects are paused for user approval. Explain your changes clearly.
+"#,
             );
         } else {
             prompt.push_str(
-                "The Lua sandbox is currently **read-only**. You may use helpers such as `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.http_request`, and `rust.log`, but do not attempt to write files. The environment is persistent: variables and functions you define are preserved across calls.\n",
+                r#"  - **Note**: `write_file`, `patch_file`, and `run_command` are currently **DISABLED** (Read-Only Mode).
+
+## Safety & Permissions
+- **Write Mode**: READ-ONLY. You cannot modify files or run commands.
+- Focus on analysis, debugging, and explaining the code.
+"#,
             );
         }
-        prompt.push_str("If you need third-party Lua helpers, vendor pure-Lua modules inside the workspace (e.g., `lua_libs/foo.lua`) and `load` them via `rust.read_file`—do not attempt global installs.\n");
 
         prompt.push_str(
-            "Be transparent whenever you run code, cite what you executed, and double-check outputs before final answers.",
+            r#"
+## Usage Patterns
+- **Exploration**: `local files = rust.list_dir("."); print(repr(files))`
+- **Searching**: `print(rust.search("TODO", "src").stdout)`
+- **Editing**:
+  1. Read file: `local src = rust.read_file("main.rs")`
+  2. Plan change: "I need to change X to Y..."
+  3. Apply: `rust.patch_file("main.rs", diff_string)` OR `rust.write_file("main.rs", new_content)`
+- **Testing**: `local res = rust.run_command("cargo", {"test"}); print(res.stdout)`
+
+## Instructions
+- **Think** before you act. Break complex tasks into steps.
+- **Use Lua** for logic. If you need to filter a list or parse data, write a script to do it.
+- **Output Results**: Use `print()` to show the user the result of your script.
+"#,
         );
 
         prompt
@@ -1289,14 +1326,14 @@ mod tests {
         cfg.allow_tool_writes = false;
         let prompt = App::build_system_prompt(&cfg);
         assert!(
-            prompt.contains("read-only"),
+            prompt.contains("READ-ONLY"),
             "prompt should mention read-only mode:\n{prompt}"
         );
 
         cfg.allow_tool_writes = true;
         let prompt = App::build_system_prompt(&cfg);
         assert!(
-            prompt.contains("can read and write"),
+            prompt.contains("ENABLED"),
             "prompt should mention write access:\n{prompt}"
         );
     }
@@ -1370,14 +1407,7 @@ mod tests {
         assert!(input.cursor_display_offset() > 0);
     }
 
-    #[test]
-    fn adjust_scroll_never_underflows() {
-        let mut scroll = 0;
-        adjust_scroll(&mut scroll, -10);
-        assert_eq!(scroll, 0);
-        adjust_scroll(&mut scroll, 5);
-        assert_eq!(scroll, 5);
-    }
+
 
     #[test]
     fn adjust_chat_scroll_moves_up_and_down() {

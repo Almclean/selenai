@@ -20,6 +20,8 @@ const SELENAI_BANNER: &[&str] = &[
     r"             SYSTEM ONLINE :: V0.01 :: 🚀",
 ];
 
+const MAX_DISPLAY_LINES: usize = 2000;
+
 pub fn render_chat(frame: &mut Frame, area: Rect, state: &AppState) {
     let border_padding = if state.copy_mode { 0 } else { 2 };
     let inner_height = area.height.saturating_sub(border_padding).max(1);
@@ -186,7 +188,16 @@ fn tool_entry_to_lines(entry: &crate::types::ToolLogEntry) -> Vec<Line<'static>>
     ]));
 
     if !entry.detail.is_empty() {
+        let mut added = 0;
         for line_str in entry.detail.lines() {
+            if added >= MAX_DISPLAY_LINES {
+                lines.push(Line::styled(
+                    format!("... (truncated {} more lines)", entry.detail.lines().count().saturating_sub(added)),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                break;
+            }
+
             let style = if line_str.starts_with("+++") || line_str.starts_with("---") {
                 Style::default().add_modifier(Modifier::BOLD)
             } else if line_str.starts_with('+') {
@@ -200,6 +211,7 @@ fn tool_entry_to_lines(entry: &crate::types::ToolLogEntry) -> Vec<Line<'static>>
             };
 
             lines.push(Line::styled(line_str.to_string(), style));
+            added += 1;
         }
     }
     lines.push(Line::default());
@@ -281,8 +293,17 @@ fn base_block<'a>(title: &'a str, focused: bool, copy_mode: bool) -> Block<'a> {
 
 fn append_multiline(lines: &mut Vec<Line>, text: &str) {
     let mut segments = text.split('\n').peekable();
+    let mut count = 0;
     while let Some(line) = segments.next() {
+        if count >= MAX_DISPLAY_LINES {
+            lines.push(Line::styled(
+                "... (content truncated for display speed) ...",
+                Style::default().fg(Color::DarkGray),
+            ));
+            break;
+        }
         lines.push(Line::from(line.to_string()));
+        count += 1;
         if segments.peek().is_none() && line.is_empty() {
             break;
         }
@@ -344,7 +365,7 @@ mod tests {
         };
         let lines = tool_entry_to_lines(&entry);
         assert!(!lines.is_empty());
-        assert!(lines[0].spans.iter().any(|s| s.content == "[ok]"));
+        assert!(lines[0].spans.iter().any(|s| s.content.contains("✅")));
         assert!(lines[0].spans.iter().any(|s| s.content == "Test Tool"));
         assert_eq!(lines[1], Line::from("Details here"));
     }
