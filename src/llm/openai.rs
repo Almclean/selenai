@@ -261,10 +261,14 @@ fn parse_chat_response(value: &Value) -> Result<ChatResponse> {
 }
 
 fn parse_message(value: &Value) -> Result<ChatResponse> {
-    if let Some(tool_calls) = value.get("tool_calls").and_then(|v| v.as_array())
-        && let Some(invocation) = tool_calls.iter().find_map(parse_tool_call)
-    {
-        return Ok(ChatResponse::ToolCall(invocation));
+    if let Some(tool_calls) = value.get("tool_calls").and_then(|v| v.as_array()) {
+        let invocations = tool_calls
+            .iter()
+            .filter_map(parse_tool_call)
+            .collect::<Vec<_>>();
+        if !invocations.is_empty() {
+            return Ok(ChatResponse::ToolCalls(invocations));
+        }
     }
 
     let content = value
@@ -510,12 +514,14 @@ mod tests {
         });
         let response = parse_chat_response(&body).expect("parsed");
         match response {
-            ChatResponse::ToolCall(invocation) => {
+            ChatResponse::ToolCalls(invocations) => {
+                assert_eq!(invocations.len(), 1);
+                let invocation = &invocations[0];
                 assert_eq!(invocation.name, "lua_run_script");
                 assert_eq!(invocation.call_id.as_deref(), Some("call_1"));
                 assert_eq!(invocation.arguments["source"], "return 1");
             }
-            other => panic!("expected tool call, got {other:?}"),
+            other => panic!("expected tool calls, got {other:?}"),
         }
     }
 

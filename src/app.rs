@@ -24,15 +24,25 @@ use crate::{
         openai::{OpenAiClient, OpenAiConfig},
     },
     lua_tool::{LuaExecution, LuaExecutor},
+    macros::MacroConfig,
     session::SessionRecorder,
     tui,
     types::{Message, Role, ToolInvocation, ToolLogEntry, ToolStatus},
 };
 
+use tracing::{info, instrument, warn};
+
 const LLM_LUA_TOOL_NAME: &str = "lua_run_script";
+
+#[derive(Debug, PartialEq)]
+enum LuaAction<'a> {
+    Run(&'a str),
+    Reset,
+}
 
 pub struct App {
     config: AppConfig,
+    macros: MacroConfig,
     state: AppState,
     llm: Arc<dyn LlmClient>,
     runtime: Runtime,
@@ -49,6 +59,7 @@ impl App {
         let workspace = env::current_dir().context("failed to get current dir")?;
         let runtime = Runtime::new()?;
         let config = AppConfig::load()?;
+        let macros = MacroConfig::load()?;
         let llm = build_llm_client(&config)?;
         let mut state = AppState::default();
         if !config.allow_tool_writes {
@@ -67,8 +78,10 @@ impl App {
                 session.session_dir().display()
             ),
         ));
-        Ok(Self {
+        
+        let mut app = Self {
             config,
+            macros,
             state,
             llm,
             runtime,
@@ -78,7 +91,35 @@ impl App {
             next_tool_id: 0,
             active_stream: None,
             pending_lua_tools: Vec::new(),
-        })
+        };
+        
+        app.check_first_run();
+        Ok(app)
+    }
+    
+    fn check_first_run(&mut self) {
+        let home = env::var("HOME").unwrap_or_else(|_| ".".into());
+        let marker = std::path::Path::new(&home).join(".config/selenai/.seen_tour");
+        
+        if !marker.exists() {
+             // Ensure directory exists
+             if let Some(parent) = marker.parent() {
+                 let _ = std::fs::create_dir_all(parent);
+             }
+             // Create marker
+             let _ = std::fs::write(&marker, "");
+             
+             self.state.push_message(Message::new(Role::Assistant, 
+                 "👋 **Welcome to SelenAI!** It looks like your first time here.\n\n\
+                  I am your terminal-based AI pair programmer. Here's a quick tour:\n\
+                  1. **Chat**: Type here to talk to me. I can read files, run tests, and edit code.\n\
+                  2. **Tools**: I execute Lua scripts to interact with your system. You'll see my plans and outputs in the right pane.\n\
+                  3. **Safety**: By default, I might be Read-Only. Check `/config show`.\n\
+                  4. **Commands**: Try `/review` to check git changes, or `/help` (conceptually) for more.\n\
+                  \n\
+                  Start by asking me to \"analyze the current project structure\"!"
+             ));
+        }
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -228,7 +269,7 @@ impl App {
     }
 
     fn submit_current_input(&mut self) {
-        let current = self.state.input.buffer();
+        let mut current = self.state.input.buffer();
         if current.trim().is_empty() {
             return;
         }
@@ -240,20 +281,104 @@ impl App {
             ));
             return;
         }
+        
+        // Macro expansion
+        if current.starts_with('@') {
+            let key = current[1..].trim();
+            if let Some(expanded) = self.macros.macros.get(key) {
+                current = expanded.clone();
+                self.state.input.clear(); // clear input manually as we consumed it
+            } else {
+                 // Unknown macro, treat as literal or error?
+                 // Let's treat as literal for now, or warn.
+            }
+        } else {
+            self.state.input.clear();
+        }
+        
+        let text = current; // input is now cleared or expanded
 
-        let text = self.state.input.take();
         self.state
             .push_message(Message::new(Role::User, text.clone()));
 
         if let Some(command) = parse_tool_command(&text) {
             self.handle_tool_command(command);
-        } else if let Some(script) = parse_lua_command(&text) {
-            self.invoke_lua(script);
+        } else if let Some(action) = parse_lua_command(&text) {
+            self.invoke_lua(action);
+        } else if let Some(target) = parse_review_command(&text) {
+             self.handle_review_command(target);
+        } else if let Some((action, key, val)) = parse_config_command(&text) {
+             self.handle_config_command(action, key, val);
         } else {
             self.invoke_llm();
         }
     }
 
+    fn handle_review_command(&mut self, target: &str) {
+        let script = format!(
+            r#"
+            local status = rust.git_status().stdout
+            if status == "" and "{target}" == "" then
+                return "Working tree clean, nothing to review."
+            end
+            
+            local diff_cmd = {{ "diff" }}
+            if "{target}" ~= "" then
+                table.insert(diff_cmd, "{target}")
+            end
+            
+            local diff = rust.run_command("git", diff_cmd).stdout
+            if diff == "" then
+                return "No changes found for review."
+            end
+            
+            return "Here is the diff for review:\n" .. diff
+            "#
+        );
+        
+        let plan = format!("Reviewing changes in `{target}` (or staged/working if empty).");
+        self.state.push_message(Message::new(Role::User, format!("/review {target}")));
+        self.run_lua_script(plan, &script, None);
+    }
+
+    fn handle_config_command(&mut self, action: &str, key: Option<&str>, val: Option<&str>) {
+        match action {
+            "show" => {
+                let display = format!("{:#?}", self.config);
+                self.state.push_message(Message::new(Role::Assistant, format!("Current Config:\n```\n{display}\n```")));
+            }
+            "set" => {
+                 if let Some(k) = key {
+                     if k == "allow_tool_writes" {
+                         if let Some(v) = val {
+                             let new_val = v == "true";
+                             self.config.allow_tool_writes = new_val;
+                             
+                             // Simple fix: recreate.
+                             match LuaExecutor::new(env::current_dir().unwrap(), new_val) {
+                                 Ok(executor) => {
+                                     self.lua = executor;
+                                     self.state.push_message(Message::new(Role::Assistant, format!("Config `{k}` set to `{new_val}`.")));
+                                 }
+                                 Err(e) => {
+                                     self.state.push_message(Message::new(Role::Assistant, format!("Failed to update config: {e}")));
+                                 }
+                             }
+                         } else {
+                             self.state.push_message(Message::new(Role::Assistant, "Missing value (true/false)."));
+                         }
+                     } else {
+                         self.state.push_message(Message::new(Role::Assistant, format!("Unknown config key `{k}`. Supported: allow_tool_writes")));
+                     }
+                 } else {
+                     self.state.push_message(Message::new(Role::Assistant, "Missing key."));
+                 }
+            }
+            _ => {}
+        }
+    }
+
+    #[instrument(skip(self))]
     fn invoke_llm(&mut self) {
         let system_prompt = Self::build_system_prompt(&self.config);
         let lua_tool = Self::build_lua_tool(&self.config);
@@ -263,6 +388,8 @@ impl App {
         if self.config.streaming {
             request = request.with_stream(true);
         }
+
+        info!("invoking LLM (streaming={})", self.config.streaming);
 
         if self.config.streaming && self.llm.supports_streaming() {
             self.invoke_llm_streaming(request);
@@ -302,10 +429,18 @@ impl App {
         });
     }
 
+    #[instrument(skip(self))]
     fn handle_chat_response(&mut self, response: ChatResponse) {
         match response {
-            ChatResponse::Assistant(message) => self.state.push_message(message),
-            ChatResponse::ToolCall(invocation) => self.handle_tool_call(invocation),
+            ChatResponse::Assistant(message) => {
+                 info!("received assistant message: {} chars", message.content.len());
+                 self.state.push_message(message);
+            }
+            ChatResponse::ToolCalls(invocations) => {
+                for invocation in invocations {
+                    self.handle_tool_call(invocation);
+                }
+            }
         }
     }
 
@@ -322,11 +457,11 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
 
         if config.allow_tool_writes {
             prompt.push_str(
-                "The Lua sandbox can read and write within the workspace via helpers like `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.write_file`, `rust.http_request`, and `rust.log`. Use writes only after verifying the plan and results.\n",
+                "The Lua sandbox can read and write within the workspace via helpers like `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.write_file`, `rust.http_request`, and `rust.log`. The environment is persistent: variables and functions you define are preserved across calls. Use this to build complex workflows step-by-step. Use writes only after verifying the plan and results.\n",
             );
         } else {
             prompt.push_str(
-                "The Lua sandbox is currently **read-only**. You may use helpers such as `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.http_request`, and `rust.log`, but do not attempt to write files.\n",
+                "The Lua sandbox is currently **read-only**. You may use helpers such as `io.open`, `fs.read`, `rust.read_file`, `rust.list_dir`, `rust.http_request`, and `rust.log`, but do not attempt to write files. The environment is persistent: variables and functions you define are preserved across calls.\n",
             );
         }
         prompt.push_str("If you need third-party Lua helpers, vendor pure-Lua modules inside the workspace (e.g., `lua_libs/foo.lua`) and `load` them via `rust.read_file`—do not attempt global installs.\n");
@@ -421,18 +556,34 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
         }
     }
 
-    fn invoke_lua(&mut self, script: &str) {
-        if script.is_empty() {
-            self.state
-                .push_message(Message::new(Role::Assistant, "Lua command needs a script."));
-            return;
+    #[instrument(skip(self))]
+    fn invoke_lua(&mut self, action: LuaAction) {
+        match action {
+            LuaAction::Run(script) => {
+                if script.is_empty() {
+                    self.state
+                        .push_message(Message::new(Role::Assistant, "Lua command needs a script."));
+                    return;
+                }
+                self.run_lua_script("Lua script", script, None);
+            }
+            LuaAction::Reset => {
+                match self.lua.reset() {
+                    Ok(()) => {
+                         self.state.push_message(Message::new(Role::Assistant, "Lua environment reset. Global variables cleared."));
+                    }
+                    Err(e) => {
+                         self.state.push_message(Message::new(Role::Assistant, format!("Failed to reset Lua environment: {e}")));
+                    }
+                }
+            }
         }
-
-        self.run_lua_script("Lua script", script, None);
     }
 
-    fn run_lua_script(&mut self, title: impl Into<String>, script: &str, call_id: Option<String>) {
-        let entry_id = self.create_tool_log_entry(title, script);
+    #[instrument(skip(self))]
+    fn run_lua_script(&mut self, title: impl Into<String> + std::fmt::Debug, script: &str, call_id: Option<String>) {
+        let title_str = title.into();
+        let entry_id = self.create_tool_log_entry(&title_str, script);
         self.execute_lua_entry(entry_id, script, call_id);
     }
 
@@ -470,7 +621,9 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
         }
     }
 
+    #[instrument(skip(self))]
     fn handle_tool_call(&mut self, invocation: ToolInvocation) {
+        info!(tool = invocation.name, "handling tool call");
         match invocation.name.as_str() {
             LLM_LUA_TOOL_NAME => self.handle_lua_tool(invocation),
             _ => self.state.push_message(render_tool_invocation(invocation)),
@@ -541,6 +694,17 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
             let _ = writeln!(detail, "Reason: {reason}");
         }
         let _ = writeln!(detail, "Script:\n{}", request.script);
+        
+        // Generate preview of side effects (e.g. patches, writes)
+        match self.lua.preview_script(&request.script) {
+            Ok(preview) => {
+                let _ = writeln!(detail, "\n--- PREVIEW ---\n{}", preview);
+            }
+            Err(err) => {
+                 let _ = writeln!(detail, "\n--- PREVIEW ERROR ---\nFailed to generate preview: {err}");
+            }
+        }
+
         let entry_id = self.create_tool_log_entry(&title, detail);
         self.pending_lua_tools.push(PendingLuaTool {
             entry_id,
@@ -780,19 +944,23 @@ impl LuaToolRequest {
     }
 }
 
-fn parse_lua_command(input: &str) -> Option<&str> {
+fn parse_lua_command(input: &str) -> Option<LuaAction> {
     let trimmed = input.trim_start();
     if !trimmed.starts_with("/lua") {
         return None;
     }
 
     let rest = &trimmed[4..];
+    if rest.trim() == "reset" {
+        return Some(LuaAction::Reset);
+    }
+    
     if rest.is_empty() {
-        return Some("");
+        return Some(LuaAction::Run(""));
     }
 
     if rest.starts_with(char::is_whitespace) {
-        return Some(rest.trim_start());
+        return Some(LuaAction::Run(rest.trim_start()));
     }
 
     None
@@ -828,6 +996,28 @@ fn parse_tool_command(input: &str) -> Option<ToolCommand> {
         }
         _ => None,
     }
+}
+
+fn parse_review_command(input: &str) -> Option<&str> {
+    let trimmed = input.trim_start();
+    if !trimmed.starts_with("/review") {
+        return None;
+    }
+    let rest = trimmed[7..].trim();
+    Some(rest)
+}
+
+fn parse_config_command(input: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
+    let trimmed = input.trim_start();
+    if !trimmed.starts_with("/config") {
+        return None;
+    }
+    let rest = trimmed[7..].trim();
+    let mut parts = rest.split_whitespace();
+    let action = parts.next()?;
+    let key = parts.next();
+    let val = parts.next();
+    Some((action, key, val))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1051,6 +1241,7 @@ struct ActiveStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn lua_tool_request_parses_fields() {
@@ -1135,8 +1326,8 @@ mod tests {
 
     #[test]
     fn parse_lua_command_handles_whitespace() {
-        assert_eq!(parse_lua_command("   /lua   return 1"), Some("return 1"));
-        assert_eq!(parse_lua_command("/lua"), Some(""));
+        assert_eq!(parse_lua_command("   /lua   return 1"), Some(LuaAction::Run("return 1")));
+        assert_eq!(parse_lua_command("/lua"), Some(LuaAction::Run("")));
         assert_eq!(parse_lua_command("lua return 1"), None);
     }
 
@@ -1249,5 +1440,93 @@ mod tests {
         let message = render_tool_invocation(invocation);
         assert!(message.content.contains("call_id: call_1"));
         assert!(message.content.contains("lua_run_script"));
+    }
+
+    #[test]
+    fn stream_robustness_handles_partial_chunks() {
+        let mut state = AppState::default();
+        let idx = state.push_message_with_index(Message::new(Role::Assistant, ""));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (res_tx, res_rx) = std_mpsc::channel();
+
+        let mut app = App {
+            config: AppConfig::default(),
+            macros: MacroConfig::default(),
+            state,
+            llm: Arc::new(StubClient::new()),
+            runtime: Runtime::new().unwrap(),
+            lua: LuaExecutor::new(".", false).unwrap(),
+            session: SessionRecorder::new(tempdir().unwrap().path(), false).unwrap(),
+            should_quit: false,
+            next_tool_id: 0,
+            active_stream: Some(ActiveStream {
+                receiver: rx,
+                result_rx: res_rx,
+                message_index: idx,
+            }),
+            pending_lua_tools: Vec::new(),
+        };
+
+        // Send chunks
+        tx.send(StreamEvent::Delta("Hello".into())).unwrap();
+        tx.send(StreamEvent::Delta(" World".into())).unwrap();
+        
+        app.poll_active_stream();
+        assert_eq!(app.state.messages[idx].content, "Hello World");
+
+        // Close stream successfully
+        drop(tx);
+        res_tx.send(Ok(())).unwrap();
+        
+        app.poll_active_stream();
+        assert!(app.active_stream.is_none());
+        assert_eq!(app.state.messages[idx].content, "Hello World");
+    }
+
+    #[test]
+    fn multi_tool_queuing_works() {
+        let mut state = AppState::default();
+        let idx = state.push_message_with_index(Message::new(Role::Assistant, ""));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (res_tx, res_rx) = std_mpsc::channel();
+
+        // Config with writes enabled to trigger queuing
+        let mut config = AppConfig::default();
+        config.allow_tool_writes = true;
+
+        let mut app = App {
+            config,
+            macros: MacroConfig::default(),
+            state,
+            llm: Arc::new(StubClient::new()),
+            runtime: Runtime::new().unwrap(),
+            lua: LuaExecutor::new(".", false).unwrap(),
+            session: SessionRecorder::new(tempdir().unwrap().path(), false).unwrap(),
+            should_quit: false,
+            next_tool_id: 0,
+            active_stream: Some(ActiveStream {
+                receiver: rx,
+                result_rx: res_rx,
+                message_index: idx,
+            }),
+            pending_lua_tools: Vec::new(),
+        };
+
+        // Simulate receiving two tool calls
+        let call1 = ToolInvocation::from_parts("lua_run_script", serde_json::json!({"source": "print(1)"}), Some("id1".into()));
+        let call2 = ToolInvocation::from_parts("lua_run_script", serde_json::json!({"source": "print(2)"}), Some("id2".into()));
+
+        tx.send(StreamEvent::ToolCall(call1)).unwrap();
+        tx.send(StreamEvent::ToolCall(call2)).unwrap();
+        
+        app.poll_active_stream();
+        
+        // Check that both are queued
+        assert_eq!(app.pending_lua_tools.len(), 2);
+        assert_eq!(app.pending_lua_tools[0].script, "print(1)");
+        assert_eq!(app.pending_lua_tools[1].script, "print(2)");
+        
+        // Check that tool log entries were created
+        assert_eq!(app.state.tool_logs.len(), 2);
     }
 }

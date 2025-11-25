@@ -31,7 +31,7 @@ fn render_focus_hint(frame: &mut Frame, area: Rect, focus: FocusTarget) {
     let hint = match focus {
         FocusTarget::Chat => "Focus: chat • Tab to move • Up/Down to scroll",
         FocusTarget::Tool => "Focus: tools • Tab to move • Up/Down to scroll",
-        FocusTarget::Input => "Focus: input • Enter to submit • /lua <code> to run",
+        FocusTarget::Input => "Focus: input • /review • /config • @macro • /lua",
     };
 
     let info_area = Rect {

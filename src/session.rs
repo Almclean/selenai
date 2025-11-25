@@ -2,10 +2,12 @@ use std::{
     fs::{self, File},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::Serialize;
 
 use crate::types::{Message, ToolLogEntry};
@@ -46,12 +48,32 @@ impl SessionRecorder {
             .with_context(|| format!("failed to create log file {}", path.display()))?;
         let mut writer = BufWriter::new(file);
         for item in items {
-            serde_json::to_writer(&mut writer, item)?;
+            let json = serde_json::to_string(item)?;
+            let redacted = redact_secrets(&json);
+            writer.write_all(redacted.as_bytes())?;
             writer.write_all(b"\n")?;
         }
         writer.flush()?;
         Ok(())
     }
+}
+
+static SECRET_REGEX: OnceLock<Vec<Regex>> = OnceLock::new();
+
+fn get_secret_regexes() -> &'static [Regex] {
+    SECRET_REGEX.get_or_init(|| {
+        vec![
+            Regex::new(r"sk-[a-zA-Z0-9-]{20,}").expect("invalid regex"),
+        ]
+    })
+}
+
+fn redact_secrets(text: &str) -> String {
+    let mut result = text.to_string();
+    for re in get_secret_regexes() {
+        result = re.replace_all(&result, "[REDACTED]").to_string();
+    }
+    result
 }
 
 fn create_unique_session_dir(root: &Path) -> Result<PathBuf> {
@@ -138,6 +160,21 @@ mod tests {
             tool_logs.contains("\"title\":\"demo\""),
             "tool logs should contain entry"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn redaction_hides_secrets() -> Result<()> {
+        let root = tempdir()?;
+        let recorder = SessionRecorder::new(root.path(), false)?;
+        let secret = "sk-123456789012345678901234";
+        let messages = vec![Message::new(Role::User, &format!("My key is {}", secret))];
+        recorder.persist(&messages, &[])?;
+        
+        let transcript_path = recorder.session_dir().join("transcript.jsonl");
+        let content = fs::read_to_string(transcript_path)?;
+        assert!(!content.contains(secret), "secret should be redacted");
+        assert!(content.contains("[REDACTED]"), "redaction placeholder should appear");
         Ok(())
     }
 }

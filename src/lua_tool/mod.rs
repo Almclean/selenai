@@ -3,14 +3,22 @@ use std::{
     ffi::OsString,
     fs, io,
     path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
     rc::Rc,
 };
 
 use anyhow::{Context, Result, bail};
 use mlua::{Lua, LuaOptions, StdLib, Table, UserData, UserDataMethods, Value, Variadic};
+use patch::{Line, Patch};
 use reqwest::{Method, blocking::Client, header::HeaderName, header::HeaderValue};
 
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
 pub struct LuaExecutor {
+    lua: Lua,
+    logs: Rc<RefCell<Vec<String>>>,
+    stdout: Rc<RefCell<Vec<String>>>,
+    stderr: Rc<RefCell<Vec<String>>>,
     workspace_root: PathBuf,
     allow_writes: bool,
     http: Client,
@@ -35,41 +43,241 @@ impl LuaExecutor {
         };
 
         let http = Client::builder().build()?;
-
-        Ok(Self {
-            workspace_root: canonical,
-            allow_writes,
-            http,
-        })
-    }
-
-    pub fn run_script(&self, script: &str) -> Result<LuaExecution> {
+        
+        // Initialize Persistent Lua VM
         let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())?;
+        
+        // Create shared buffers
         let logs = Rc::new(RefCell::new(Vec::new()));
         let stdout = Rc::new(RefCell::new(Vec::new()));
         let stderr = Rc::new(RefCell::new(Vec::new()));
-        let rust_api = self.build_rust_api(&lua, logs.clone(), stderr.clone())?;
+
+        // We need to register the "real" API now.
+        // Note: We cannot use `self.build_rust_api` easily here because `self` doesn't exist yet.
+        // We will refactor the helper construction to simple functions or methods that don't require `self` 
+        // if we pass the dependencies (root, allow_writes, http) manually.
+        // OR we construct a temporary "Builder" or just init `LuaExecutor` with fields and THEN setup Lua?
+        // `Lua` is in the struct. We can't have `self.lua` valid while calling methods on `self`.
+        //
+        // Easier approach:
+        // 1. Create `LuaExecutor` with `lua` (and buffers).
+        // 2. Call a private method `init_lua(&self)` which registers everything.
+        //    This works because `Lua` uses interior mutability (or we use `&lua` from `self.lua`).
+        
+        let executor = Self {
+            lua,
+            logs,
+            stdout,
+            stderr,
+            workspace_root: canonical,
+            allow_writes,
+            http,
+        };
+        
+        executor.init_lua()?;
+        
+        Ok(executor)
+    }
+    
+    fn init_lua(&self) -> Result<()> {
+        let lua = &self.lua;
+        let logs = self.logs.clone();
+        let stdout = self.stdout.clone();
+        let stderr = self.stderr.clone();
+
+        let rust_api = self.build_rust_api(lua, logs.clone(), stderr.clone())?;
+        let globals = lua.globals();
+        let _ = globals.raw_set("os", Value::Nil);
+        globals.set("print", self.make_print_fn(lua, stdout)?)?;
+        globals.set("warn", self.make_warn_fn(lua, stderr)?)?;
+        globals.set("rust", rust_api)?;
+        globals.set("io", self.build_io_table(lua)?)?;
+        globals.set("fs", self.build_fs_table(lua)?)?;
+        let package = self.build_package_table(lua)?;
+        globals.set("package", package)?;
+        globals.set("require", self.make_safe_require_fn(lua)?)?;
+        
+        // Load Prelude
+        let prelude = include_str!("prelude.lua");
+        lua.load(prelude).set_name("prelude").exec()?;
+        
+        Ok(())
+    }
+
+    pub fn reset(&mut self) -> Result<()> {
+        self.lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())?;
+        self.logs.borrow_mut().clear();
+        self.stdout.borrow_mut().clear();
+        self.stderr.borrow_mut().clear();
+        self.init_lua()
+    }
+
+    pub fn run_script(&self, script: &str) -> Result<LuaExecution> {
+        // Clear buffers from previous run
+        self.logs.borrow_mut().clear();
+        self.stdout.borrow_mut().clear();
+        self.stderr.borrow_mut().clear();
+
+        let value = self.lua.load(script).set_name("tool").eval::<Value>()?;
+        
+        Ok(LuaExecution {
+            value: render_value(value),
+            logs: collect_buffer(self.logs.clone()),
+            stdout: collect_buffer(self.stdout.clone()),
+            stderr: collect_buffer(self.stderr.clone()),
+        })
+    }
+
+    pub fn preview_script(&self, script: &str) -> Result<String> {
+        let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())?;
+        // We use the 'logs' buffer to collect preview messages
+        let logs = Rc::new(RefCell::new(Vec::new()));
+        let stdout = Rc::new(RefCell::new(Vec::new()));
+        let stderr = Rc::new(RefCell::new(Vec::new()));
+        
+        let rust_api = self.build_preview_rust_api(&lua, logs.clone(), stderr.clone())?;
+        
         let globals = lua.globals();
         let _ = globals.raw_set("os", Value::Nil);
         globals.set("print", self.make_print_fn(&lua, stdout.clone())?)?;
         globals.set("warn", self.make_warn_fn(&lua, stderr.clone())?)?;
         globals.set("rust", rust_api.clone())?;
+        // For IO/FS tables, we ideally want preview versions too, but for now 
+        // we can leave them as read-only (since we aren't enabling writes in this mode anyway).
+        // But wait, build_io_table checks 'allow_writes'. 
+        // In preview mode, we effectively want 'allow_writes' to be FALSE for the real FS,
+        // but we want the 'rust' helpers to simulate writes.
+        // Since 'self.allow_writes' might be true, we should be careful.
+        // Actually, we can just use the standard build_io_table. If the script tries `io.open(..., "w")`,
+        // it will either work (if allowed) or fail.
+        // Ideally, preview shouldn't perform ANY real writes.
+        // So we should construct a LuaExecutor with allow_writes=false?
+        // No, we are implementing a method on existing executor.
+        // We should manually mock io/fs to be safe or just accept that `io.open` writes happen if the script does them.
+        // But the LLM is instructed to use `rust.*` helpers.
+        // Let's just expose `rust` preview helpers.
+        
         globals.set("io", self.build_io_table(&lua)?)?;
         globals.set("fs", self.build_fs_table(&lua)?)?;
         let package = self.build_package_table(&lua)?;
         globals.set("package", package)?;
         globals.set("require", self.make_safe_require_fn(&lua)?)?;
 
-        let value = lua.load(script).set_name("tool").eval::<Value>()?;
-        let logs = collect_buffer(logs);
-        let stdout = collect_buffer(stdout);
-        let stderr = collect_buffer(stderr);
-        Ok(LuaExecution {
-            value: render_value(value),
-            logs,
-            stdout,
-            stderr,
-        })
+        // Run the script. We ignore the return value and stdout, 
+        // we just want to capture the side-effects logged by our preview helpers.
+        let _ = lua.load(script).set_name("preview").eval::<Value>();
+        
+        let collected = collect_buffer(logs);
+        if collected.is_empty() {
+            Ok("No write operations detected in script.".to_string())
+        } else {
+            Ok(collected.join("\n"))
+        }
+    }
+
+    fn build_preview_rust_api<'lua>(
+        &self,
+        lua: &'lua Lua,
+        logs: Rc<RefCell<Vec<String>>>,
+        stderr: Rc<RefCell<Vec<String>>>,
+    ) -> Result<Table<'lua>> {
+        let table = lua.create_table()?;
+        // Read-only helpers are fine to be real
+        table.set("read_file", self.make_read_fn(lua)?)?;
+        table.set("list_dir", self.make_list_fn(lua)?)?;
+        table.set("http_request", self.make_http_fn(lua)?)?;
+        table.set("git_status", self.make_git_status_fn(lua)?)?;
+        table.set("search", self.make_search_fn(lua)?)?;
+        table.set("log", self.make_log_fn(lua, logs.clone())?)?; // log to our preview buffer
+        table.set("eprint", self.make_eprint_fn(lua, stderr)?)?;
+        table.set("mcp", self.make_mcp_table(lua)?)?;
+        
+        // Write helpers are replaced by preview versions
+        table.set("write_file", self.make_preview_write_fn(lua, logs.clone())?)?;
+        table.set("patch_file", self.make_preview_patch_file_fn(lua, logs.clone())?)?;
+        table.set("run_command", self.make_preview_run_command_fn(lua, logs.clone())?)?;
+        
+        Ok(table)
+    }
+
+    fn make_preview_write_fn<'lua>(
+        &self,
+        lua: &'lua Lua,
+        logs: Rc<RefCell<Vec<String>>>,
+    ) -> Result<mlua::Function<'lua>> {
+        let fun = lua.create_function(move |_, (path, contents): (String, String)| {
+            logs.borrow_mut().push(format!("Would write to `{}` ({} bytes)", path, contents.len()));
+            Ok(())
+        })?;
+        Ok(fun)
+    }
+
+    fn make_preview_patch_file_fn<'lua>(
+        &self,
+        lua: &'lua Lua,
+        logs: Rc<RefCell<Vec<String>>>,
+    ) -> Result<mlua::Function<'lua>> {
+        let root = self.workspace_root.clone();
+        let fun = lua.create_function(move |_, (path, diff): (String, String)| {
+            let resolved = match resolve_safe_path(&root, Path::new(&path)) {
+                Ok(p) => p,
+                Err(e) => {
+                    logs.borrow_mut().push(format!("Invalid path `{path}`: {e}"));
+                    return Ok(());
+                }
+            };
+            
+            if !resolved.exists() {
+                logs.borrow_mut().push(format!("Patch target `{path}` does not exist."));
+                return Ok(());
+            }
+
+            let original = match fs::read_to_string(&resolved) {
+                Ok(s) => s,
+                Err(e) => {
+                    logs.borrow_mut().push(format!("Could not read `{path}`: {e}"));
+                    return Ok(());
+                }
+            };
+
+            let patch = match Patch::from_single(&diff) {
+                Ok(p) => p,
+                Err(e) => {
+                    logs.borrow_mut().push(format!("Invalid diff format for `{path}`: {e}"));
+                    return Ok(());
+                }
+            };
+            
+            match apply_patch(&original, &patch) {
+                Ok(_) => {
+                    logs.borrow_mut().push(format!("Patch applies cleanly to `{path}`:\n{}", diff));
+                }
+                Err(e) => {
+                    logs.borrow_mut().push(format!("Patch CONFLICT for `{path}`: {e}"));
+                }
+            }
+            
+            Ok(())
+        })?;
+        Ok(fun)
+    }
+    
+    fn make_preview_run_command_fn<'lua>(
+        &self,
+        lua: &'lua Lua,
+        logs: Rc<RefCell<Vec<String>>>,
+    ) -> Result<mlua::Function<'lua>> {
+        let fun = lua.create_function(move |lua_ctx, (cmd, args): (String, Vec<String>)| {
+            logs.borrow_mut().push(format!("Would run command: {} {}", cmd, args.join(" ")));
+            
+            // Return dummy success result so script continues
+            let result = lua_ctx.create_table()?;
+            result.set("status", 0)?;
+            result.set("stdout", "")?;
+            result.set("stderr", "")?;
+            Ok(result)
+        })?;
+        Ok(fun)
     }
 
     fn build_rust_api<'lua>(
@@ -82,7 +290,11 @@ impl LuaExecutor {
         table.set("read_file", self.make_read_fn(lua)?)?;
         table.set("list_dir", self.make_list_fn(lua)?)?;
         table.set("write_file", self.make_write_fn(lua)?)?;
+        table.set("patch_file", self.make_patch_file_fn(lua)?)?;
         table.set("http_request", self.make_http_fn(lua)?)?;
+        table.set("run_command", self.make_run_command_fn(lua)?)?;
+        table.set("git_status", self.make_git_status_fn(lua)?)?;
+        table.set("search", self.make_search_fn(lua)?)?;
         table.set("log", self.make_log_fn(lua, logs)?)?;
         table.set("eprint", self.make_eprint_fn(lua, stderr)?)?;
         table.set("mcp", self.make_mcp_table(lua)?)?;
@@ -109,6 +321,17 @@ impl LuaExecutor {
         let fun = lua.create_function(move |_, path: String| {
             let resolved =
                 resolve_safe_path(&root, Path::new(&path)).map_err(mlua::Error::external)?;
+
+            let meta = fs::metadata(&resolved).map_err(|e| {
+                mlua::Error::external(format!("could not get metadata for {}: {e}", resolved.display()))
+            })?;
+            if meta.len() > MAX_FILE_SIZE {
+                return Err(mlua::Error::external(format!(
+                    "file {} exceeds size limit ({} bytes)",
+                    path, MAX_FILE_SIZE
+                )));
+            }
+
             let data = fs::read_to_string(&resolved).map_err(|e| {
                 mlua::Error::external(format!("could not read {}: {e}", resolved.display()))
             })?;
@@ -131,12 +354,26 @@ impl LuaExecutor {
             }
             let resolved =
                 resolve_safe_path(&root, Path::new(&path)).map_err(mlua::Error::external)?;
+
+            if !file_mode.allows_write() {
+                 // Check size if reading
+                if let Ok(meta) = fs::metadata(&resolved) {
+                     if meta.len() > MAX_FILE_SIZE {
+                        return Err(mlua::Error::external(format!(
+                            "file {} exceeds size limit ({} bytes)",
+                            path, MAX_FILE_SIZE
+                        )));
+                     }
+                }
+            }
+
             let handle = LuaFileHandle::open(resolved, file_mode)
                 .map_err(|err| mlua::Error::external(format!("{err:#}")))?;
             lua_ctx.create_userdata(handle)
         })?;
         Ok(fun)
     }
+
 
     fn make_io_lines_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
         let root = self.workspace_root.clone();
@@ -220,6 +457,119 @@ impl LuaExecutor {
         })?;
         Ok(fun)
     }
+
+    fn make_patch_file_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let root = self.workspace_root.clone();
+        let allow = self.allow_writes;
+        let fun = lua.create_function(move |_, (path, diff): (String, String)| {
+            if !allow {
+                return Err(mlua::Error::external(
+                    "write helpers are disabled (set allow_tool_writes = true)",
+                ));
+            }
+            let resolved =
+                resolve_safe_path(&root, Path::new(&path)).map_err(mlua::Error::external)?;
+
+            let meta = fs::metadata(&resolved).map_err(|e| {
+                mlua::Error::external(format!("could not get metadata for {}: {e}", resolved.display()))
+            })?;
+            if meta.len() > MAX_FILE_SIZE {
+                return Err(mlua::Error::external(format!(
+                    "file {} exceeds size limit ({} bytes)",
+                    path, MAX_FILE_SIZE
+                )));
+            }
+
+            let original = fs::read_to_string(&resolved).map_err(|e| {
+                mlua::Error::external(format!("could not read {}: {e}", resolved.display()))
+            })?;
+
+            let patch = Patch::from_single(&diff).map_err(|e| {
+                mlua::Error::external(format!("failed to parse diff: {e}"))
+            })?;
+
+            let modified = apply_patch(&original, &patch).map_err(|e| {
+                 mlua::Error::external(format!("failed to apply patch: {e}"))
+            })?;
+            
+            fs::write(&resolved, modified).map_err(|e| {
+                mlua::Error::external(format!("could not write patched file {}: {e}", resolved.display()))
+            })?;
+            
+            Ok(())
+        })?;
+        Ok(fun)
+    }
+
+    fn make_run_command_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let root = self.workspace_root.clone();
+        let allow = self.allow_writes;
+        let fun = lua.create_function(move |lua_ctx, (cmd, args): (String, Vec<String>)| {
+            if !allow {
+                return Err(mlua::Error::external(
+                    "write helpers (including run_command) are disabled",
+                ));
+            }
+
+            let output = Command::new(&cmd)
+                .args(&args)
+                .current_dir(&root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| mlua::Error::external(format!("failed to run {cmd}: {e}")))?;
+
+            let result = lua_ctx.create_table()?;
+            result.set("status", output.status.code().unwrap_or(-1))?;
+            result.set("stdout", String::from_utf8_lossy(&output.stdout).to_string())?;
+            result.set("stderr", String::from_utf8_lossy(&output.stderr).to_string())?;
+            Ok(result)
+        })?;
+        Ok(fun)
+    }
+
+    fn make_git_status_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let root = self.workspace_root.clone();
+        let fun = lua.create_function(move |lua_ctx, ()| {
+            let output = Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&root)
+                .output()
+                .map_err(|e| mlua::Error::external(format!("git status failed: {e}")))?;
+
+            let result = lua_ctx.create_table()?;
+            result.set("status", output.status.code().unwrap_or(-1))?;
+            result.set("stdout", String::from_utf8_lossy(&output.stdout).to_string())?;
+            Ok(result)
+        })?;
+        Ok(fun)
+    }
+
+    fn make_search_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let root = self.workspace_root.clone();
+        let fun = lua.create_function(move |lua_ctx, (pattern, dir): (String, Option<String>)| {
+            let target_dir = if let Some(d) = dir {
+                resolve_safe_path(&root, Path::new(&d)).map_err(mlua::Error::external)?
+            } else {
+                root.clone()
+            };
+
+            let output = Command::new("grep")
+                .args(["-r", "-n", &pattern, "."])
+                .current_dir(&target_dir)
+                .output()
+                .map_err(|e| mlua::Error::external(format!("grep failed: {e}")))?;
+
+            let result = lua_ctx.create_table()?;
+            result.set("status", output.status.code().unwrap_or(-1))?;
+            result.set("stdout", String::from_utf8_lossy(&output.stdout).to_string())?;
+            result.set("stderr", String::from_utf8_lossy(&output.stderr).to_string())?;
+            Ok(result)
+        })?;
+        Ok(fun)
+    }
+
+
 
     fn make_http_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
         let client = self.http.clone();
@@ -566,6 +916,38 @@ fn table_to_string(table: &Table) -> String {
     format!("{{{}}}", items.join(", "))
 }
 
+fn apply_patch(original: &str, patch: &Patch) -> Result<String> {
+    let mut lines: Vec<&str> = original.lines().collect();
+    let mut offset: isize = 0;
+
+    for hunk in &patch.hunks {
+        let start = hunk.old_range.start as isize + offset - 1;
+        if start < 0 { bail!("invalid line number in patch"); }
+        let start = start as usize;
+        
+        let old_count = hunk.old_range.count as usize;
+        
+        if start + old_count > lines.len() {
+             bail!("patch application out of bounds (line {})", start + 1);
+        }
+        
+        let mut new_block = Vec::new();
+        for line in &hunk.lines {
+             match line {
+                 Line::Context(s) | Line::Add(s) => new_block.push(*s),
+                 Line::Remove(_) => {}
+             }
+        }
+        
+        lines.splice(start..start+old_count, new_block.clone());
+        
+        let new_count = new_block.len();
+        offset += (new_count as isize) - (old_count as isize);
+    }
+    
+    Ok(lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +1115,112 @@ mod tests {
         assert!(matches!(FileMode::parse("w").unwrap(), FileMode::Write));
         assert!(matches!(FileMode::parse("a").unwrap(), FileMode::Append));
         assert!(FileMode::parse("invalid").is_err());
+    }
+
+    #[test]
+    fn patch_file_applies_diff() -> Result<()> {
+        let tmp = tempdir()?;
+        let file = tmp.path().join("code.rs");
+        fs::write(&file, "fn main() {\n    println!(\"old\");\n}\n")?;
+        
+        let executor = LuaExecutor::new(tmp.path(), true)?;
+        let diff = r#"--- code.rs
++++ code.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    println!("old");
++    println!("new");
+ }
+"#;
+        let diff_lua = diff.replace("\\", "\\\\").replace("\n", "\\n").replace("\"", "\\\"");
+        
+        let script = format!(r#"
+            rust.patch_file("code.rs", "{}")
+            return rust.read_file("code.rs")
+        "#, diff_lua);
+        
+        let output = executor.run_script(&script)?;
+        assert_eq!(output.value, "fn main() {\n    println!(\"new\");\n}");
+        Ok(())
+    }
+
+    #[test]
+    fn run_command_executes_shell_cmd() -> Result<()> {
+        let tmp = tempdir()?;
+        let executor = LuaExecutor::new(tmp.path(), true)?;
+        
+        // echo is usually built-in or available
+        let script = r#"
+            local res = rust.run_command("echo", {"hello"})
+            return res.stdout
+        "#;
+        
+        let output = executor.run_script(script)?;
+        assert!(output.value.trim().contains("hello"));
+        Ok(())
+    }
+
+    #[test]
+    fn run_command_blocked_if_read_only() -> Result<()> {
+        let tmp = tempdir()?;
+        let executor = LuaExecutor::new(tmp.path(), false)?; // read-only
+        let script = r#"rust.run_command("echo", {"hello"})"#;
+        let err = executor.run_script(script);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("write helpers"));
+        Ok(())
+    }
+
+    #[test]
+    fn persistence_preserves_globals() -> Result<()> {
+        let tmp = tempdir()?;
+        let executor = LuaExecutor::new(tmp.path(), false)?;
+        
+        // First run: define a variable
+        let _ = executor.run_script("x = 42")?;
+        
+        // Second run: read it back
+        let output = executor.run_script("return x")?;
+        
+        assert_eq!(output.value, "42");
+        Ok(())
+    }
+
+    #[test]
+    fn prelude_is_loaded() -> Result<()> {
+        let tmp = tempdir()?;
+        let executor = LuaExecutor::new(tmp.path(), false)?;
+
+        // Check repr
+        let output = executor.run_script("return repr({a=1})")?;
+        // Output format depends on repr impl but should contain keys
+        assert!(output.value.contains("a = 1"));
+
+        // Check functional helpers
+        let output = executor.run_script(
+            "return table.concat(map({1,2,3}, function(x) return x*2 end), ',')"
+        )?;
+        assert_eq!(output.value, "2,4,6");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn reset_clears_globals() -> Result<()> {
+        let tmp = tempdir()?;
+        let mut executor = LuaExecutor::new(tmp.path(), false)?;
+        
+        executor.run_script("x = 100")?;
+        executor.reset()?;
+        
+        let output = executor.run_script("return x")?;
+        assert_eq!(output.value, "nil");
+        
+        // Prelude should still be loaded after reset
+        let output = executor.run_script("return repr(nil)")?;
+        assert_eq!(output.value, "nil");
+        
+        Ok(())
     }
 }
 

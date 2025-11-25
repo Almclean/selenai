@@ -51,7 +51,7 @@ impl ChatRequest {
 #[derive(Debug, Clone)]
 pub enum ChatResponse {
     Assistant(Message),
-    ToolCall(ToolInvocation),
+    ToolCalls(Vec<ToolInvocation>),
 }
 
 impl ChatResponse {
@@ -160,8 +160,10 @@ impl LlmClient for StubClient {
                     let _ = sender.send(StreamEvent::Delta(message.content));
                 }
             }
-            ChatResponse::ToolCall(call) => {
-                let _ = sender.send(StreamEvent::ToolCall(call));
+            ChatResponse::ToolCalls(calls) => {
+                for call in calls {
+                    let _ = sender.send(StreamEvent::ToolCall(call));
+                }
             }
         }
         let _ = sender.send(StreamEvent::Completed);

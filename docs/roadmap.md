@@ -10,7 +10,7 @@ The MVP is stable; this plan prioritizes safer write flows, richer toolchains, a
 
 ## Capability Expansions
 - Multi-tool pipeline: support multiple approved tool runs per turn with a queued/parallel view in `tui/`, enabling batch reads followed by a single write.
-- Safe patch helper: add `rust.patch_file(path, diff)` to apply unified diffs with previews in the tool log and explicit approvals.
+- Safe patch helper: `rust.patch_file(path, diff)` is implemented with auto-preview. Queued tool runs now show a dry-run diff in the log pane before approval.
 - MCP/server helpers: ship a first-party MCP server exposing repo-aware tools (ripgrep proxy, rustfmt formatter, git status) callable via `/tool load`.
 
 ## Experience & Ergonomics

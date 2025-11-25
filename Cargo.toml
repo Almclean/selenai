@@ -17,6 +17,10 @@ reqwest = { version = "0.12.4", default-features = false, features = ["json", "s
 toml = "0.8.14"
 futures-util = "0.3"
 dotenvy = "0.15"
+patch = "0.7.0"
+regex = "1.12.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3.10"
