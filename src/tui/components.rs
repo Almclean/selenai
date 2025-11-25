@@ -11,13 +11,13 @@ use crate::{
 };
 
 const SELENAI_BANNER: &[&str] = &[
-    r"  ____________________.____     ___________ _______      _____  .___ ",
-    r" /   _____/\_   _____/|    |    \_   _____/ \      \    /  _  \ |   |",
-    r" \_____  \  |    __)_ |    |     |    __)_  /   |   \  /  /_\  \|   |",
-    r" /        \ |        \|    |___  |        \/    |    \/    |    \   |",
-    r"/_______  //_______  /|_______ \/_______  /\____|__  /\____|__  /___|",
-    r"        \/         \/         \/        \/         \/         \/     ",
-    r"                            S E L E N A I V0.01",
+    r"  ███████╗███████╗██╗     ███████╗███╗   ██╗ █████╗ ██╗",
+    r"  ██╔════╝██╔════╝██║     ██╔════╝████╗  ██║██╔══██╗██║",
+    r"  ███████╗█████╗  ██║     █████╗  ██╔██╗ ██║███████║██║",
+    r"  ╚════██║██╔══╝  ██║     ██╔══╝  ██║╚██╗██║██╔══██║██║",
+    r"  ███████║███████╗███████╗███████╗██║ ╚████║██║  ██║██║",
+    r"  ╚══════╝╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝",
+    r"             SYSTEM ONLINE :: V0.01 :: 🚀",
 ];
 
 pub fn render_chat(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -114,89 +114,56 @@ pub fn render_tool_logs(frame: &mut Frame, area: Rect, state: &AppState) {
     let inner_height = area.height.saturating_sub(border_padding).max(1);
     let inner_width = area.width.saturating_sub(border_padding).max(1);
 
-    let mut collected_lines: Vec<Line> = Vec::new();
-    let mut current_line_index: u16 = 0;
-    let scroll_top = state.tool_scroll;
+    let required_height = state.tool_scroll.saturating_add(inner_height);
+    let mut collected_blocks: Vec<Vec<Line>> = Vec::new();
+    let mut current_height: u16 = 0;
 
-    // Iterate through logs to find visible range
-    // Optimization: We could optimize this by estimating height without fully constructing lines
-    // if performance becomes an issue with massive logs.
-    
-    let mut entries_processed = 0;
-    // If no logs, show placeholder
-    if state.tool_logs.is_empty() {
-        collected_lines.push(Line::from(
-            "Tool log will appear here. Try `/lua rust.list_dir(\".\")`.",
-        ));
-    } else {
-        for entry in &state.tool_logs {
-            let lines = tool_entry_to_lines(entry);
-            let height = estimate_wrapped_height(&lines, inner_width);
-            
-            // Check if this entry ends before the scroll view starts
-            if (current_line_index as u32 + height as u32) <= scroll_top as u32 {
-                current_line_index = current_line_index.saturating_add(height);
-                entries_processed += 1;
-                continue;
-            }
+    // Iterate backwards through logs
+    for entry in state.tool_logs.iter().rev() {
+        let lines = tool_entry_to_lines(entry);
+        let height = estimate_wrapped_height(&lines, inner_width);
+        collected_blocks.push(lines);
+        current_height = current_height.saturating_add(height);
 
-            // Calculate overlap
-            let skip_in_entry = scroll_top.saturating_sub(current_line_index);
-            // We need to simulate the "wrapped" lines skipping
-            // This is tricky because `lines` are logical lines, not wrapped lines.
-            // To do this correctly with wrapping, we really need to flatten the logical lines into wrapped lines
-            // or rely on Paragraph's internal wrapping, but Paragraph expects a contiguous list.
-            //
-            // Simplified approach:
-            // If we are strictly virtualizing lines fed to Paragraph, Paragraph handles wrapping of THOSE lines.
-            // BUT if we have long logical lines that wrap, `skip_in_entry` (which is in wrapped rows) 
-            // doesn't map 1:1 to logical lines index.
-            //
-            // For now, to solve the "too much content" crash, we can just render *lines* (logical) 
-            // that are roughly in view. 
-            // However, strictly correct scrolling with wrapping requires accurate height calc.
-            //
-            // Let's assume `lines` are logical lines. `estimate_wrapped_height` gives visual rows.
-            // If we want precise scrolling "by visual row", we effectively have to split logical lines.
-            //
-            // fallback: Just add all lines of the overlapping entry and let Paragraph handle the 
-            // fine-grained scrolling for the *first* visible entry.
-            
-            collected_lines.extend(lines);
-            
-            // If we have enough lines to fill the screen (plus some buffer for the first partial entry), break.
-            // We use a loose heuristic here.
-            let current_visual_height = estimate_wrapped_height(&collected_lines, inner_width);
-             // inner_height + skip_in_entry (because we will scroll the paragraph by skip_in_entry)
-            if current_visual_height > inner_height.saturating_add(skip_in_entry) {
-                break;
-            }
-            
-            current_line_index = current_line_index.saturating_add(height);
+        if current_height >= required_height {
+            break;
         }
     }
 
-    // Calculate the local scroll for the paragraph.
-    // We skipped `current_line_index` rows entirely.
-    // The `scroll_top` is relative to global 0.
-    // So the paragraph should be scrolled by `scroll_top - current_line_index`.
-    // Wait, `current_line_index` tracks the start of the *current processing entry*?
-    // No, in the loop `current_line_index` is updated AFTER processing.
-    // So when we hit the first visible entry, `current_line_index` is the start of that entry.
-    // `scroll_top` is where we want to be.
-    // So local scroll = `scroll_top - current_line_index`.
-    
-    let local_scroll = scroll_top.saturating_sub(current_line_index);
+    if current_height < required_height && state.tool_logs.is_empty() {
+        collected_blocks.push(vec![Line::from(
+            "Tool log will appear here. Try `/lua rust.list_dir(\".\")`.",
+        )]);
+    }
+
+    collected_blocks.reverse();
+    let lines: Vec<Line> = collected_blocks.into_iter().flatten().collect();
+
+    let mut title = "Tool Activity".to_string();
+    let total_lines = estimate_wrapped_height(&lines, inner_width);
+    let baseline = total_lines.saturating_sub(inner_height);
+    let offset_from_bottom = state.tool_scroll.min(baseline);
+    let scroll_top = baseline.saturating_sub(offset_from_bottom);
+
+    if total_lines > inner_height {
+        let percent = if baseline == 0 {
+            100
+        } else {
+            let ratio = scroll_top as f64 / baseline as f64;
+            (ratio * 100.0).round() as u16
+        };
+        title = format!("Tool Activity ({percent:>3}%)");
+    }
 
     let block = base_block(
-        "Tool activity",
+        &title,
         state.focus == FocusTarget::Tool,
         state.copy_mode,
     );
-    
-    let paragraph = Paragraph::new(collected_lines)
+
+    let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((local_scroll, 0))
+        .scroll((scroll_top, 0))
         .block(block);
 
     frame.render_widget(paragraph, area);
@@ -204,35 +171,35 @@ pub fn render_tool_logs(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn tool_entry_to_lines(entry: &crate::types::ToolLogEntry) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let status_style = match entry.status {
-        ToolStatus::Pending => Style::default().fg(Color::Yellow),
-        ToolStatus::Success => Style::default().fg(Color::Green),
-        ToolStatus::Error => Style::default().fg(Color::Red),
+    let (icon, style) = match entry.status {
+        ToolStatus::Pending => ("⏳", Style::default().fg(Color::Yellow)),
+        ToolStatus::Success => ("✅", Style::default().fg(Color::Green)),
+        ToolStatus::Error => ("❌", Style::default().fg(Color::Red)),
     };
+    
     lines.push(Line::from(vec![
-        Span::styled(format!("[{}]", entry.status.as_str()), status_style),
-        Span::raw(" "),
+        Span::styled(format!("{icon} "), style),
         Span::styled(
             entry.title.clone(),
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ]));
-    
+
     if !entry.detail.is_empty() {
         for line_str in entry.detail.lines() {
-             let style = if line_str.starts_with("+++") || line_str.starts_with("---") {
-                 Style::default().add_modifier(Modifier::BOLD)
-             } else if line_str.starts_with('+') {
-                 Style::default().fg(Color::Green)
-             } else if line_str.starts_with('-') {
-                 Style::default().fg(Color::Red)
-             } else if line_str.starts_with("@@") {
-                 Style::default().fg(Color::Cyan)
-             } else {
-                 Style::default()
-             };
-             
-             lines.push(Line::styled(line_str.to_string(), style));
+            let style = if line_str.starts_with("+++") || line_str.starts_with("---") {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else if line_str.starts_with('+') {
+                Style::default().fg(Color::Green)
+            } else if line_str.starts_with('-') {
+                Style::default().fg(Color::Red)
+            } else if line_str.starts_with("@@") {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+
+            lines.push(Line::styled(line_str.to_string(), style));
         }
     }
     lines.push(Line::default());
@@ -297,9 +264,16 @@ fn base_block<'a>(title: &'a str, focused: bool, copy_mode: bool) -> Block<'a> {
     if copy_mode {
         Block::default().title(title)
     } else {
-        let mut block = Block::default().borders(Borders::ALL).title(title);
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(title);
         if focused {
-            block = block.border_style(Style::default().fg(Color::Cyan));
+            block = block
+                .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        } else {
+            block = block.border_style(Style::default().fg(Color::DarkGray));
         }
         block
     }

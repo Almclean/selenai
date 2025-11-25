@@ -263,7 +263,7 @@ impl App {
     fn scroll_active(&mut self, delta: i16) {
         match self.state.focus {
             FocusTarget::Chat => adjust_chat_scroll(&mut self.state.chat_scroll, delta),
-            FocusTarget::Tool => adjust_scroll(&mut self.state.tool_scroll, delta),
+            FocusTarget::Tool => adjust_chat_scroll(&mut self.state.tool_scroll, delta),
             FocusTarget::Input => {}
         }
     }
@@ -596,6 +596,7 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
         self.next_tool_id += 1;
         let entry = ToolLogEntry::new(entry_id, title, detail);
         self.state.tool_logs.push(entry);
+        self.state.tool_scroll = 0;
         entry_id
     }
 
@@ -798,10 +799,6 @@ Key expectations (inspired by Cloudflare's Code Mode and Anthropic's MCP guidanc
     }
 }
 
-fn adjust_scroll(scroll: &mut u16, delta: i16) {
-    let current = *scroll as i32 + delta as i32;
-    *scroll = current.max(0) as u16;
-}
 
 fn adjust_chat_scroll(scroll: &mut u16, delta: i16) {
     if delta > 0 {
@@ -1075,6 +1072,7 @@ impl AppState {
         if let Some(entry) = self.tool_logs.iter_mut().find(|entry| entry.id == id) {
             entry.status = status;
             entry.detail = detail.into();
+            self.tool_scroll = 0;
         }
     }
 
