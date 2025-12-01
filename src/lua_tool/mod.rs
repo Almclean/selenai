@@ -11,6 +11,8 @@ use anyhow::{Context, Result, bail};
 use mlua::{Lua, LuaOptions, StdLib, Table, UserData, UserDataMethods, Value, Variadic};
 use patch::{Line, Patch};
 use reqwest::{Method, blocking::Client, header::HeaderName, header::HeaderValue};
+use tokio::runtime::Handle;
+use yahoo_finance_api as yahoo;
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
@@ -19,9 +21,11 @@ pub struct LuaExecutor {
     logs: Rc<RefCell<Vec<String>>>,
     stdout: Rc<RefCell<Vec<String>>>,
     stderr: Rc<RefCell<Vec<String>>>,
+    dashboard_updates: Rc<RefCell<Vec<String>>>,
     workspace_root: PathBuf,
     allow_writes: bool,
     http: Client,
+    handle: Handle,
 }
 
 #[derive(Debug, Clone)]
@@ -30,10 +34,11 @@ pub struct LuaExecution {
     pub logs: Vec<String>,
     pub stdout: Vec<String>,
     pub stderr: Vec<String>,
+    pub dashboard_updates: Vec<String>,
 }
 
 impl LuaExecutor {
-    pub fn new(root: impl Into<PathBuf>, allow_writes: bool) -> Result<Self> {
+    pub fn new(root: impl Into<PathBuf>, allow_writes: bool, handle: Handle) -> Result<Self> {
         let root = root.into();
         let canonical = if root.exists() {
             root.canonicalize()
@@ -51,6 +56,7 @@ impl LuaExecutor {
         let logs = Rc::new(RefCell::new(Vec::new()));
         let stdout = Rc::new(RefCell::new(Vec::new()));
         let stderr = Rc::new(RefCell::new(Vec::new()));
+        let dashboard_updates = Rc::new(RefCell::new(Vec::new()));
 
         // We need to register the "real" API now.
         // Note: We cannot use `self.build_rust_api` easily here because `self` doesn't exist yet.
@@ -69,9 +75,11 @@ impl LuaExecutor {
             logs,
             stdout,
             stderr,
+            dashboard_updates,
             workspace_root: canonical,
             allow_writes,
             http,
+            handle,
         };
         
         executor.init_lua()?;
@@ -109,6 +117,7 @@ impl LuaExecutor {
         self.logs.borrow_mut().clear();
         self.stdout.borrow_mut().clear();
         self.stderr.borrow_mut().clear();
+        self.dashboard_updates.borrow_mut().clear();
         self.init_lua()
     }
 
@@ -117,6 +126,7 @@ impl LuaExecutor {
         self.logs.borrow_mut().clear();
         self.stdout.borrow_mut().clear();
         self.stderr.borrow_mut().clear();
+        self.dashboard_updates.borrow_mut().clear();
 
         let value = self.lua.load(script).set_name("tool").eval::<Value>()?;
         
@@ -125,6 +135,7 @@ impl LuaExecutor {
             logs: collect_buffer(self.logs.clone()),
             stdout: collect_buffer(self.stdout.clone()),
             stderr: collect_buffer(self.stderr.clone()),
+            dashboard_updates: collect_buffer(self.dashboard_updates.clone()),
         })
     }
 
@@ -298,7 +309,52 @@ impl LuaExecutor {
         table.set("log", self.make_log_fn(lua, logs)?)?;
         table.set("eprint", self.make_eprint_fn(lua, stderr)?)?;
         table.set("mcp", self.make_mcp_table(lua)?)?;
+        table.set("get_quote", self.make_get_quote_fn(lua)?)?;
+        table.set("set_context", self.make_set_context_fn(lua, self.dashboard_updates.clone())?)?;
+        table.set("env", self.make_env_fn(lua)?)?;
         Ok(table)
+    }
+
+    fn make_get_quote_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let handle = self.handle.clone();
+        let fun = lua.create_function(move |lua_ctx, ticker: String| {
+            let provider = yahoo::YahooConnector::new()
+                .map_err(|e| mlua::Error::external(format!("init error: {e}")))?;
+            let result = handle.block_on(async {
+                 provider.get_latest_quotes(&ticker, "1d").await
+            });
+
+            match result {
+                Ok(response) => {
+                     let quote = response.last_quote().map_err(|e| mlua::Error::external(format!("no quote found: {e}")))?;
+                     let table = lua_ctx.create_table()?;
+                     table.set("price", quote.close)?;
+                     table.set("high", quote.high)?;
+                     table.set("low", quote.low)?;
+                     table.set("volume", quote.volume as u64)?;
+                     table.set("timestamp", quote.timestamp)?;
+                     Ok(table)
+                },
+                Err(e) => Err(mlua::Error::external(format!("yahoo api error: {e}")))
+            }
+        })?;
+        Ok(fun)
+    }
+
+    fn make_set_context_fn<'lua>(&self, lua: &'lua Lua, updates: Rc<RefCell<Vec<String>>>) -> Result<mlua::Function<'lua>> {
+        let fun = lua.create_function(move |_, ctx: Table| {
+            let json = serde_json::to_string(&lua_to_json(&ctx)?).map_err(|e| mlua::Error::external(format!("serialization error: {e}")))?;
+            updates.borrow_mut().push(json);
+            Ok(())
+        })?;
+        Ok(fun)
+    }
+
+    fn make_env_fn<'lua>(&self, lua: &'lua Lua) -> Result<mlua::Function<'lua>> {
+        let fun = lua.create_function(|_, key: String| {
+            Ok(std::env::var(key).ok())
+        })?;
+        Ok(fun)
     }
 
     fn build_io_table<'lua>(&self, lua: &'lua Lua) -> Result<Table<'lua>> {
@@ -885,6 +941,24 @@ fn canonicalize_with_missing(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
+fn lua_to_json(table: &Table) -> Result<serde_json::Value, mlua::Error> {
+    let mut map = serde_json::Map::new();
+    for pair in table.clone().pairs::<String, Value>() {
+        let (key, value) = pair?;
+        let json_val = match value {
+            Value::Nil => serde_json::Value::Null,
+            Value::Boolean(b) => serde_json::Value::Bool(b),
+            Value::Integer(i) => serde_json::Value::Number(i.into()),
+            Value::Number(n) => serde_json::Number::from_f64(n).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+            Value::String(s) => serde_json::Value::String(s.to_string_lossy().into_owned()),
+            Value::Table(t) => lua_to_json(&t)?,
+            _ => serde_json::Value::String(format!("{:?}", value)),
+        };
+        map.insert(key, json_val);
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
 fn render_value(value: Value) -> String {
     match value {
         Value::Nil => "nil".into(),
@@ -953,12 +1027,19 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn create_executor(root: &Path, allow_writes: bool) -> Result<(LuaExecutor, tokio::runtime::Runtime)> {
+        let rt = tokio::runtime::Runtime::new()?;
+        let handle = rt.handle().clone();
+        let executor = LuaExecutor::new(root, allow_writes, handle)?;
+        Ok((executor, rt))
+    }
+
     #[test]
     fn io_open_supports_reading_files() -> Result<()> {
         let tmp = tempdir()?;
         let file = tmp.path().join("sample.txt");
         fs::write(&file, "alpha\nbeta")?;
-        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let (executor, _rt) = create_executor(tmp.path(), false)?;
         let output = executor.run_script(
             r#"
             local f = io.open("sample.txt", "r")
@@ -974,7 +1055,7 @@ mod tests {
     #[test]
     fn io_open_respects_write_flag() -> Result<()> {
         let tmp = tempdir()?;
-        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let (executor, _rt) = create_executor(tmp.path(), false)?;
         let err = executor.run_script(
             r#"
             local f = io.open("new.txt", "w")
@@ -991,7 +1072,7 @@ mod tests {
     #[test]
     fn io_open_allows_creating_files_when_enabled() -> Result<()> {
         let tmp = tempdir()?;
-        let executor = LuaExecutor::new(tmp.path(), true)?;
+        let (executor, _rt) = create_executor(tmp.path(), true)?;
         let output = executor.run_script(
             r#"
             local f = io.open("dir/example.txt", "w")
@@ -1048,7 +1129,7 @@ mod tests {
         });
 
         let tmp = tempdir()?;
-        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let (executor, _rt) = create_executor(tmp.path(), false)?;
         let script = format!(
             r#"
             local resp = rust.http_request{{
@@ -1072,7 +1153,7 @@ mod tests {
         let tmp = tempdir()?;
         fs::write(tmp.path().join("one.txt"), "1")?;
         fs::create_dir(tmp.path().join("dir"))?;
-        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let (executor, _rt) = create_executor(tmp.path(), false)?;
         let output = executor.run_script(
             r#"
             local entries = rust.list_dir(".")
@@ -1095,7 +1176,7 @@ mod tests {
     #[test]
     fn rust_log_records_messages() -> Result<()> {
         let tmp = tempdir()?;
-        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let (executor, _rt) = create_executor(tmp.path(), false)?;
         let output = executor.run_script(
             r#"
             rust.log("note")
@@ -1123,7 +1204,7 @@ mod tests {
         let file = tmp.path().join("code.rs");
         fs::write(&file, "fn main() {\n    println!(\"old\");\n}\n")?;
         
-        let executor = LuaExecutor::new(tmp.path(), true)?;
+        let (executor, _rt) = create_executor(tmp.path(), true)?;
         let diff = r#"--- code.rs
 +++ code.rs
 @@ -1,3 +1,3 @@
@@ -1147,7 +1228,7 @@ mod tests {
     #[test]
     fn run_command_executes_shell_cmd() -> Result<()> {
         let tmp = tempdir()?;
-        let executor = LuaExecutor::new(tmp.path(), true)?;
+        let (executor, _rt) = create_executor(tmp.path(), true)?;
         
         // echo is usually built-in or available
         let script = r#"
@@ -1163,7 +1244,7 @@ mod tests {
     #[test]
     fn run_command_blocked_if_read_only() -> Result<()> {
         let tmp = tempdir()?;
-        let executor = LuaExecutor::new(tmp.path(), false)?; // read-only
+        let (executor, _rt) = create_executor(tmp.path(), false)?; // read-only
         let script = r#"rust.run_command("echo", {"hello"})"#;
         let err = executor.run_script(script);
         assert!(err.is_err());
@@ -1174,7 +1255,7 @@ mod tests {
     #[test]
     fn persistence_preserves_globals() -> Result<()> {
         let tmp = tempdir()?;
-        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let (executor, _rt) = create_executor(tmp.path(), false)?;
         
         // First run: define a variable
         let _ = executor.run_script("x = 42")?;
@@ -1189,7 +1270,7 @@ mod tests {
     #[test]
     fn prelude_is_loaded() -> Result<()> {
         let tmp = tempdir()?;
-        let executor = LuaExecutor::new(tmp.path(), false)?;
+        let (executor, _rt) = create_executor(tmp.path(), false)?;
 
         // Check repr
         let output = executor.run_script("return repr({a=1})")?;
@@ -1208,7 +1289,7 @@ mod tests {
     #[test]
     fn reset_clears_globals() -> Result<()> {
         let tmp = tempdir()?;
-        let mut executor = LuaExecutor::new(tmp.path(), false)?;
+        let (mut executor, _rt) = create_executor(tmp.path(), false)?;
         
         executor.run_script("x = 100")?;
         executor.reset()?;

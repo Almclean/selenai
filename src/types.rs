@@ -165,3 +165,28 @@ mod tests {
         );
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MarketContext {
+    pub active_ticker: Option<String>,
+    pub price: Option<f64>,
+    pub change_percent: Option<f64>,
+    pub volume: Option<u64>,
+    pub market_cap: Option<String>,
+    pub headlines: Vec<String>,
+    pub technical_summary: String,
+}
+
+impl MarketContext {
+    pub fn mock_for(ticker: &str) -> Self {
+        Self {
+            active_ticker: Some(ticker.to_uppercase()),
+            price: Some(150.0),
+            change_percent: Some(1.5),
+            volume: Some(1_000_000),
+            market_cap: Some("1T".to_string()),
+            headlines: vec!["Mock Headline 1".to_string(), "Mock Headline 2".to_string()],
+            technical_summary: "Neutral".to_string(),
+        }
+    }
+}

@@ -1,13 +1,14 @@
 mod components;
+mod market;
 
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     prelude::*,
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph, Tabs},
 };
 
-use crate::app::{AppState, FocusTarget};
+use crate::app::{AppState, FocusTarget, RightPanelTab};
 
 pub fn draw(frame: &mut Frame, state: &AppState) {
     let vertical = Layout::default()
@@ -21,10 +22,43 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         .split(vertical[0]);
 
     components::render_chat(frame, horizontal[0], state);
-    components::render_tool_logs(frame, horizontal[1], state);
+
+    let right_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(horizontal[1]);
+
+    render_tabs(frame, right_layout[0], state);
+
+    match state.active_tab {
+        RightPanelTab::ToolLogs => components::render_tool_logs(frame, right_layout[1], state),
+        RightPanelTab::MarketData => market::render_market_data(frame, right_layout[1], &state.market_context),
+    }
+
     components::render_input(frame, vertical[1], state);
 
     render_focus_hint(frame, vertical[1], state.focus);
+}
+
+fn render_tabs(frame: &mut Frame, area: Rect, state: &AppState) {
+    let titles = vec![RightPanelTab::ToolLogs.title(), RightPanelTab::MarketData.title()];
+    let selected = match state.active_tab {
+        RightPanelTab::ToolLogs => 0,
+        RightPanelTab::MarketData => 1,
+    };
+
+    let block = if state.focus == FocusTarget::Tool {
+        Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))
+    } else {
+        Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray))
+    };
+
+    let tabs = Tabs::new(titles)
+        .block(block)
+        .select(selected)
+        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+    frame.render_widget(tabs, area);
 }
 
 fn render_focus_hint(frame: &mut Frame, area: Rect, focus: FocusTarget) {

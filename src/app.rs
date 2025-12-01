@@ -27,7 +27,7 @@ use crate::{
     macros::MacroConfig,
     session::SessionRecorder,
     tui,
-    types::{Message, Role, ToolInvocation, ToolLogEntry, ToolStatus},
+    types::{MarketContext, Message, Role, ToolInvocation, ToolLogEntry, ToolStatus},
 };
 
 use tracing::{info, instrument, warn};
@@ -58,6 +58,7 @@ impl App {
     pub fn new() -> Result<Self> {
         let workspace = env::current_dir().context("failed to get current dir")?;
         let runtime = Runtime::new()?;
+        let handle = runtime.handle().clone();
         let config = AppConfig::load()?;
         let macros = MacroConfig::load()?;
         let llm = build_llm_client(&config)?;
@@ -85,7 +86,7 @@ impl App {
             state,
             llm,
             runtime,
-            lua: LuaExecutor::new(workspace, allow_writes)?,
+            lua: LuaExecutor::new(workspace, allow_writes, handle)?,
             session,
             should_quit: false,
             next_tool_id: 0,
@@ -228,6 +229,12 @@ impl App {
             KeyCode::Down => self.scroll_active(1),
             KeyCode::PageUp => self.scroll_active(-5),
             KeyCode::PageDown => self.scroll_active(5),
+            KeyCode::Left if self.state.focus == FocusTarget::Tool => {
+                self.state.active_tab = self.state.active_tab.next();
+            }
+            KeyCode::Right if self.state.focus == FocusTarget::Tool => {
+                self.state.active_tab = self.state.active_tab.next();
+            }
             KeyCode::Enter if self.state.focus == FocusTarget::Input => self.submit_current_input(),
             _ => {
                 if self.state.focus == FocusTarget::Input {
@@ -307,11 +314,37 @@ impl App {
             self.invoke_lua(action);
         } else if let Some(target) = parse_review_command(&text) {
              self.handle_review_command(target);
+        } else if let Some(ticker) = parse_context_command(&text) {
+             self.handle_context_command(ticker);
         } else if let Some((action, key, val)) = parse_config_command(&text) {
              self.handle_config_command(action, key, val);
         } else {
             self.invoke_llm();
         }
+    }
+
+    fn handle_context_command(&mut self, ticker: &str) {
+        if ticker.is_empty() {
+             self.state.push_message(Message::new(Role::Assistant, "Usage: /context <TICKER>"));
+             return;
+        }
+
+        let script = format!(
+            r#"
+            local quote = rust.get_quote("{ticker}")
+            rust.set_context({{
+                active_ticker = "{ticker}",
+                price = quote.price,
+                change_percent = 0.0,
+                headlines = {{ "Manually set context to " .. "{ticker}" }},
+                technical_summary = "Loaded via /context"
+            }})
+            return "Context updated to " .. "{ticker}"
+            "#
+        );
+
+        self.state.push_message(Message::new(Role::User, format!("/context {ticker}")));
+        self.run_lua_script(format!("Fetch context for {ticker}"), &script, None);
     }
 
     fn handle_review_command(&mut self, target: &str) {
@@ -355,7 +388,8 @@ impl App {
                              self.config.allow_tool_writes = new_val;
                              
                              // Simple fix: recreate.
-                             match LuaExecutor::new(env::current_dir().unwrap(), new_val) {
+                             let handle = self.runtime.handle().clone();
+                             match LuaExecutor::new(env::current_dir().unwrap(), new_val, handle) {
                                  Ok(executor) => {
                                      self.lua = executor;
                                      self.state.push_message(Message::new(Role::Assistant, format!("Config `{k}` set to `{new_val}`.")));
@@ -463,6 +497,9 @@ Your primary method of interaction is the `{LLM_LUA_TOOL_NAME}` tool, which exec
   - `rust.search(pattern, dir?)` -> `{{stdout, stderr, status}}` (Recursive grep)
   - `rust.git_status()` -> `{{stdout, status}}`
   - `rust.http_request({{url=..., method=..., headers=..., body=...}})` -> `{{status, body, headers}}`
+  - `rust.get_quote(ticker)` -> `{{price, high, low, volume, timestamp}}`
+  - `rust.set_context(table)` -> nil (Updates dashboard with {{active_ticker, price, etc.}})
+  - `rust.env(key)` -> string or nil
 "#
         );
 
@@ -504,6 +541,7 @@ Your primary method of interaction is the `{LLM_LUA_TOOL_NAME}` tool, which exec
 - **Think** before you act. Break complex tasks into steps.
 - **Use Lua** for logic. If you need to filter a list or parse data, write a script to do it.
 - **Output Results**: Use `print()` to show the user the result of your script.
+- **Context Awareness**: If the user asks about a stock, use `rust.get_quote` and `rust.set_context` to update the dashboard.
 "#,
         );
 
@@ -647,6 +685,13 @@ Your primary method of interaction is the `{LLM_LUA_TOOL_NAME}` tool, which exec
                 });
                 self.state
                     .update_tool_log(entry_id, ToolStatus::Success, rendered);
+
+                for update in output.dashboard_updates {
+                     if let Ok(ctx) = serde_json::from_str::<MarketContext>(&update) {
+                         self.state.market_context = ctx;
+                         self.state.active_tab = RightPanelTab::MarketData;
+                     }
+                }
             }
             Err(err) => {
                 let msg = format!("Lua error: {err:#}");
@@ -1041,6 +1086,15 @@ fn parse_review_command(input: &str) -> Option<&str> {
     Some(rest)
 }
 
+fn parse_context_command(input: &str) -> Option<&str> {
+    let trimmed = input.trim_start();
+    if !trimmed.starts_with("/context") {
+        return None;
+    }
+    let rest = trimmed[8..].trim();
+    Some(rest)
+}
+
 fn parse_config_command(input: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
     let trimmed = input.trim_start();
     if !trimmed.starts_with("/config") {
@@ -1062,6 +1116,29 @@ enum ToolCommand {
     SkipEntry(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightPanelTab {
+    #[default]
+    ToolLogs,
+    MarketData,
+}
+
+impl RightPanelTab {
+    pub fn next(self) -> Self {
+        match self {
+            RightPanelTab::ToolLogs => RightPanelTab::MarketData,
+            RightPanelTab::MarketData => RightPanelTab::ToolLogs,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            RightPanelTab::ToolLogs => "Tool Logs",
+            RightPanelTab::MarketData => "Market Data",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub messages: Vec<Message>,
@@ -1072,6 +1149,8 @@ pub struct AppState {
     pub chat_scroll: u16,
     pub tool_scroll: u16,
     pub copy_mode: bool,
+    pub active_tab: RightPanelTab,
+    pub market_context: MarketContext,
 }
 
 impl Default for AppState {
@@ -1084,6 +1163,8 @@ impl Default for AppState {
             chat_scroll: 0,
             tool_scroll: 0,
             copy_mode: false,
+            active_tab: RightPanelTab::default(),
+            market_context: MarketContext::default(),
         };
         state.push_message(Message::new(
             Role::Assistant,
@@ -1476,14 +1557,16 @@ mod tests {
         let idx = state.push_message_with_index(Message::new(Role::Assistant, ""));
         let (tx, rx) = mpsc::unbounded_channel();
         let (res_tx, res_rx) = std_mpsc::channel();
+        let runtime = Runtime::new().unwrap();
+        let handle = runtime.handle().clone();
 
         let mut app = App {
             config: AppConfig::default(),
             macros: MacroConfig::default(),
             state,
             llm: Arc::new(StubClient::new()),
-            runtime: Runtime::new().unwrap(),
-            lua: LuaExecutor::new(".", false).unwrap(),
+            runtime,
+            lua: LuaExecutor::new(".", false, handle).unwrap(),
             session: SessionRecorder::new(tempdir().unwrap().path(), false).unwrap(),
             should_quit: false,
             next_tool_id: 0,
@@ -1522,13 +1605,16 @@ mod tests {
         let mut config = AppConfig::default();
         config.allow_tool_writes = true;
 
+        let runtime = Runtime::new().unwrap();
+        let handle = runtime.handle().clone();
+
         let mut app = App {
             config,
             macros: MacroConfig::default(),
             state,
             llm: Arc::new(StubClient::new()),
-            runtime: Runtime::new().unwrap(),
-            lua: LuaExecutor::new(".", false).unwrap(),
+            runtime,
+            lua: LuaExecutor::new(".", false, handle).unwrap(),
             session: SessionRecorder::new(tempdir().unwrap().path(), false).unwrap(),
             should_quit: false,
             next_tool_id: 0,
